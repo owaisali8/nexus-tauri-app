@@ -67,6 +67,13 @@ type AgentPromptResponse = {
   runtimePlan: RuntimePlan;
 };
 
+type DatabaseInfo = {
+  path: string;
+  agentCount: number;
+  noteCount: number;
+  browserRunCount: number;
+};
+
 type AppSnapshot = {
   providers: LlmProvider[];
   agents: AgentProfile[];
@@ -99,6 +106,7 @@ function App() {
   const [llmPrompt, setLlmPrompt] = useState("Summarize your current role and what tools you can use.");
   const [llmOutput, setLlmOutput] = useState("");
   const [isPromptRunning, setIsPromptRunning] = useState(false);
+  const [databaseInfo, setDatabaseInfo] = useState<DatabaseInfo | null>(null);
 
   useEffect(() => {
     refreshSnapshot()
@@ -124,6 +132,7 @@ function App() {
         setSnapshot(data);
         setSelectedAgentId(data.agents[0]?.id ?? selectedAgentId);
       });
+    await invoke<DatabaseInfo>("get_database_info").then(setDatabaseInfo);
   }
 
   const selectedAgent = useMemo(
@@ -421,6 +430,26 @@ function App() {
                   <span>{folder.items}</span>
                 </div>
               ))}
+            </div>
+          </section>
+
+          <section className="panel compact-panel">
+            <p className="eyebrow">SQLite store</p>
+            <h3>{databaseInfo ? "Connected" : "Loading"}</h3>
+            <p>{databaseInfo?.path ?? "Resolving database path"}</p>
+            <div className="folder-list">
+              <div>
+                <strong>Agents</strong>
+                <span>{databaseInfo?.agentCount ?? 0}</span>
+              </div>
+              <div>
+                <strong>Notes</strong>
+                <span>{databaseInfo?.noteCount ?? 0}</span>
+              </div>
+              <div>
+                <strong>Runs</strong>
+                <span>{databaseInfo?.browserRunCount ?? 0}</span>
+              </div>
             </div>
           </section>
 

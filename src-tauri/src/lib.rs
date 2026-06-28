@@ -8,7 +8,7 @@ use core::{
     browser::{BrowserRun, BrowserRunRequest},
     llm::LlmProvider,
     memory::{Note, WorkspaceFolder},
-    store::AppState,
+    store::{AppState, DatabaseInfo},
 };
 use serde::Serialize;
 use std::path::PathBuf;
@@ -37,6 +37,11 @@ fn get_app_snapshot(app: AppHandle) -> Result<AppSnapshot, String> {
         browser_runs: state.browser_runs,
         rig_marker: core::agent::runtime::rig_marker().to_string(),
     })
+}
+
+#[tauri::command]
+fn get_database_info(app: AppHandle) -> Result<DatabaseInfo, String> {
+    core::store::database_info(&app_data_dir(&app)?)
 }
 
 #[tauri::command]
@@ -146,6 +151,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             get_app_snapshot,
+            get_database_info,
             save_agent,
             save_note,
             prepare_browser_run,

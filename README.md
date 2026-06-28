@@ -6,7 +6,7 @@ Essentio is a Tauri 2 desktop application for creating local-first AI agents, st
 
 - React + TypeScript desktop UI with a dark Nothing-inspired theme.
 - Rust core module boundaries for agents, tools, skills, memory, LLMs, MCP, browser runs, and persistence.
-- Local JSON state persisted in the Tauri app data directory.
+- SQLite state persisted in the Tauri app data directory.
 - Editable agent system instructions, provider, and model.
 - Saved notes and browser run drafts.
 - Rig-backed LLM prompt execution through the `run_agent_prompt` Tauri command.
@@ -53,9 +53,22 @@ cd src-tauri
 cargo check
 ```
 
+Run Rust tests:
+
+```bash
+cd src-tauri
+cargo test
+```
+
+## Persistence
+
+The app stores local data in `essentio.sqlite3` under the Tauri app data directory. Migrations live in `src-tauri/db/migrations`.
+
+On first launch after upgrading from the early JSON prototype, Essentio imports `essentio-state.json` if it exists and the SQLite database is empty.
+
 ## Next Slices
 
-- SQLite migrations for agents, notes, files, sessions, and memory.
+- File records, sessions, and long-term memory tables.
 - CDP browser controller for navigation, DOM inspection, field filling, and PDF upload.
 - MCP server config, discovery, and tool invocation.
 - Agent skills loaded from local folders and injected into Rig context.
