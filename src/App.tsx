@@ -14,6 +14,7 @@ import type {
   SessionMessage,
   StoredProvider,
 } from "./types";
+import { NavIcon } from "./icons";
 import "./App.css";
 
 const defaultSnapshot: AppSnapshot = {
@@ -362,6 +363,14 @@ function App() {
     }
   }
 
+  const viewTitles: Record<AppView, string> = {
+    providers: "Providers",
+    agents: "Agents",
+    chat: "Chat",
+    files: "Files",
+    memory: "Memory",
+  };
+
   const navItems: { id: AppView; label: string; enabled: boolean }[] = [
     { id: "providers", label: "Providers", enabled: true },
     { id: "agents", label: "Agents", enabled: readyProviders.length > 0 },
@@ -375,10 +384,7 @@ function App() {
       <aside className="sidebar">
         <div className="brand">
           <div className="brand-mark">e</div>
-          <div>
-            <h1>essentio</h1>
-            <p>agent operating system</p>
-          </div>
+          <h1>essentio</h1>
         </div>
 
         <nav className="nav-list" aria-label="Primary">
@@ -389,50 +395,24 @@ function App() {
               key={item.id}
               onClick={() => item.enabled && setView(item.id)}
             >
-              <span>{item.label.slice(0, 1)}</span>
-              {item.label}
+              <span className="nav-icon-wrap">
+                <NavIcon view={item.id} />
+              </span>
+              <span className="nav-label">{item.label}</span>
             </button>
           ))}
         </nav>
 
-        <section className="sidebar-section">
-          <div className="section-label">Setup progress</div>
-          <div className="setup-steps">
-            <div className={readyProviders.length > 0 ? "setup-step done" : "setup-step active"}>
-              <strong>1. Providers</strong>
-              <small>{readyProviders.length} configured</small>
-            </div>
-            <div className={snapshot.agents.length > 0 ? "setup-step done" : "setup-step"}>
-              <strong>2. Agents</strong>
-              <small>{snapshot.agents.length} created</small>
-            </div>
-            <div className={agentSessions.length > 0 ? "setup-step done" : "setup-step"}>
-              <strong>3. Sessions</strong>
-              <small>{agentSessions.length} for current agent</small>
-            </div>
-          </div>
-        </section>
-
-        <section className="sidebar-section">
-          <div className="section-label">Providers</div>
-          <div className="provider-list">
-            {snapshot.providers.map((provider) => (
-              <div className="provider-row" key={provider.id}>
-                <span className={`status-dot ${provider.kind} ${provider.status}`} />
-                <div>
-                  <strong>{provider.name}</strong>
-                  <small>{provider.status.replace(/_/g, " ")}</small>
-                </div>
-              </div>
-            ))}
-          </div>
-        </section>
+        <footer className="sidebar-footer">
+          <span className="sidebar-footer-label">Local store</span>
+          <p>{databaseInfo?.agentCount ?? 0} agents · {databaseInfo?.sessionCount ?? 0} sessions</p>
+        </footer>
       </aside>
 
       <section className="workspace">
         <header className="topbar">
           <div>
-            <p className="eyebrow">{view}</p>
+            <p className="eyebrow">{viewTitles[view]}</p>
             <h2>
               {view === "providers" && "Connect your LLM providers"}
               {view === "agents" && "Create a custom agent"}
