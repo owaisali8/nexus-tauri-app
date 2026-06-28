@@ -382,6 +382,7 @@ function App() {
 
   return (
     <main className="app-shell">
+    <WindowControls />
       <aside className="sidebar">
         <div className="brand" data-tauri-drag-region>
           <div className="brand-mark">e</div>
@@ -428,7 +429,6 @@ function App() {
                 New session
               </button>
             )}
-            <WindowControls />
           </div>
         </header>
 
