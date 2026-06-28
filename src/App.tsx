@@ -15,6 +15,7 @@ import type {
   StoredProvider,
 } from "./types";
 import { NavIcon } from "./icons";
+import { WindowControls } from "./WindowControls";
 import "./App.css";
 
 const defaultSnapshot: AppSnapshot = {
@@ -382,7 +383,7 @@ function App() {
   return (
     <main className="app-shell">
       <aside className="sidebar">
-        <div className="brand">
+        <div className="brand" data-tauri-drag-region>
           <div className="brand-mark">e</div>
           <h1>essentio</h1>
         </div>
@@ -411,7 +412,7 @@ function App() {
 
       <section className="workspace">
         <header className="topbar">
-          <div>
+          <div className="topbar-main" data-tauri-drag-region>
             <p className="eyebrow">{viewTitles[view]}</p>
             <h2>
               {view === "providers" && "Connect your LLM providers"}
@@ -427,6 +428,7 @@ function App() {
                 New session
               </button>
             )}
+            <WindowControls />
           </div>
         </header>
 
