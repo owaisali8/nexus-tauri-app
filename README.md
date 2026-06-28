@@ -1,7 +1,61 @@
-# Tauri + React + Typescript
+# Essentio
 
-This template should help get you started developing with Tauri, React and Typescript in Vite.
+Essentio is a Tauri 2 desktop application for creating local-first AI agents, storing notes/files, and preparing browser automation workflows.
 
-## Recommended IDE Setup
+## Current Capabilities
 
-- [VS Code](https://code.visualstudio.com/) + [Tauri](https://marketplace.visualstudio.com/items?itemName=tauri-apps.tauri-vscode) + [rust-analyzer](https://marketplace.visualstudio.com/items?itemName=rust-lang.rust-analyzer)
+- React + TypeScript desktop UI with a dark Nothing-inspired theme.
+- Rust core module boundaries for agents, tools, skills, memory, LLMs, MCP, browser runs, and persistence.
+- Local JSON state persisted in the Tauri app data directory.
+- Editable agent system instructions, provider, and model.
+- Saved notes and browser run drafts.
+- Rig-backed LLM prompt execution through the `run_agent_prompt` Tauri command.
+
+## LLM Providers
+
+The app reads provider credentials from environment variables:
+
+- OpenAI: `OPENAI_API_KEY`, optional `OPENAI_BASE_URL`
+- OpenRouter: `OPENROUTER_API_KEY`
+- Anthropic: `ANTHROPIC_API_KEY`
+- Ollama: optional `OLLAMA_API_BASE_URL`, optional `OLLAMA_API_KEY`
+- LM Studio: optional `LMSTUDIO_BASE_URL`, optional `LMSTUDIO_API_KEY`
+
+Default local URLs:
+
+- Ollama: `http://localhost:11434`
+- LM Studio: `http://localhost:1234/v1`
+
+## Development
+
+Install dependencies:
+
+```bash
+npm install
+```
+
+Run the desktop app:
+
+```bash
+npm run tauri dev
+```
+
+Build frontend:
+
+```bash
+npm run build
+```
+
+Check Rust:
+
+```bash
+cd src-tauri
+cargo check
+```
+
+## Next Slices
+
+- SQLite migrations for agents, notes, files, sessions, and memory.
+- CDP browser controller for navigation, DOM inspection, field filling, and PDF upload.
+- MCP server config, discovery, and tool invocation.
+- Agent skills loaded from local folders and injected into Rig context.
