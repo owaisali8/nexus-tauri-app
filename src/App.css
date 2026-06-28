@@ -66,6 +66,7 @@ button:disabled {
     width: 100vw;
     height: 100vh;
     overflow: hidden;
+    transition: grid-template-columns 0.3s cubic-bezier(0.4, 0, 0.2, 1);
     background:
         radial-gradient(
             circle at 15% 50%,
@@ -78,6 +79,18 @@ button:disabled {
             transparent 40%
         ),
         var(--bg-root);
+}
+
+.global-titlebar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 32px;
+    z-index: 9998;
+    background: transparent;
+    -webkit-app-region: drag;
+    app-region: drag;
 }
 
 .sidebar {
@@ -102,8 +115,46 @@ button:disabled {
     align-items: center;
     gap: 12px;
     padding: 4px 8px 12px;
-    -webkit-app-region: drag;
-    app-region: drag;
+}
+
+.collapse-btn {
+    background: transparent;
+    border: none;
+    color: var(--text-muted);
+    padding: 4px;
+    border-radius: 6px;
+    display: grid;
+    place-items: center;
+    margin-left: auto;
+}
+
+.collapse-btn:hover {
+    background: rgba(255, 255, 255, 0.1);
+    color: var(--text);
+}
+
+.app-shell.sidebar-collapsed {
+    grid-template-columns: 76px minmax(0, 1fr);
+}
+
+.app-shell.sidebar-collapsed .brand h1,
+.app-shell.sidebar-collapsed .nav-label,
+.app-shell.sidebar-collapsed .sidebar-footer p,
+.app-shell.sidebar-collapsed .sidebar-footer-label {
+    display: none;
+}
+
+.app-shell.sidebar-collapsed .nav-item {
+    justify-content: center;
+    padding: 10px 0;
+}
+
+.app-shell.sidebar-collapsed .nav-item .nav-icon-wrap {
+    margin: 0;
+}
+
+.app-shell.sidebar-collapsed .sidebar {
+    padding: 24px 12px;
 }
 
 .brand-mark {
@@ -473,8 +524,6 @@ button:disabled {
     flex: 1;
     min-width: 0;
     padding-top: 4px;
-    -webkit-app-region: drag;
-    app-region: drag;
 }
 
 .window-controls {
@@ -599,8 +648,18 @@ button:disabled {
     line-height: 1.2;
 }
 
-.agent-panel, .run-panel, .llm-panel {
+.run-panel, .llm-panel {
     min-height: 560px;
+}
+
+.agent-panel {
+    max-width: 680px;
+    width: 100%;
+}
+
+.content-grid.single-panel-layout {
+    display: flex;
+    justify-content: flex-start;
 }
 
 .field {

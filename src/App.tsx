@@ -60,6 +60,7 @@ function App() {
   const [selectedAgentId, setSelectedAgentId] = useState("");
   const [agentDraft, setAgentDraft] = useState<AgentProfile | null>(null);
   const [runtimePlan, setRuntimePlan] = useState<RuntimePlan | null>(null);
+  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
 
   const [selectedSessionId, setSelectedSessionId] = useState("");
   const [messages, setMessages] = useState<SessionMessage[]>([]);
@@ -381,12 +382,19 @@ function App() {
   ];
 
   return (
-    <main className="app-shell">
+    <main className={`app-shell ${isSidebarCollapsed ? "sidebar-collapsed" : ""}`}>
+      <div data-tauri-drag-region className="global-titlebar" />
     <WindowControls />
       <aside className="sidebar">
-        <div className="brand" data-tauri-drag-region>
-          <div className="brand-mark">e</div>
+        <div className="brand">
           <h1>essentio</h1>
+          <button className="collapse-btn" onClick={() => setIsSidebarCollapsed(!isSidebarCollapsed)}>
+            {isSidebarCollapsed ? (
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M9 18l6-6-6-6"/></svg>
+            ) : (
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M15 18l-6-6 6-6"/></svg>
+            )}
+          </button>
         </div>
 
         <nav className="nav-list" aria-label="Primary">
@@ -413,7 +421,7 @@ function App() {
 
       <section className="workspace">
         <header className="topbar">
-          <div className="topbar-main" data-tauri-drag-region>
+          <div className="topbar-main">
             <p className="eyebrow">{viewTitles[view]}</p>
             <h2>
               {view === "providers" && "Connect your LLM providers"}
@@ -439,7 +447,6 @@ function App() {
             <section className="panel">
               <div className="panel-header">
                 <div>
-                  <p className="eyebrow">Step 1</p>
                   <h3>Add an LLM provider</h3>
                 </div>
               </div>
@@ -539,11 +546,10 @@ function App() {
         )}
 
         {view === "agents" && (
-          <div className="content-grid">
+          <div className="content-grid single-panel-layout">
             <section className="panel agent-panel">
               <div className="panel-header">
                 <div>
-                  <p className="eyebrow">Step 2</p>
                   <h3>{selectedAgent ? "Edit agent" : "Create agent"}</h3>
                 </div>
                 <select
@@ -638,18 +644,6 @@ function App() {
                 <button className="primary-button" onClick={saveAgent}>
                   Save agent
                 </button>
-              </div>
-            </section>
-
-            <section className="panel compact-panel">
-              <p className="eyebrow">Runtime</p>
-              <h3>{runtimePlan?.ready ? "Ready" : "Needs config"}</h3>
-              <p>{runtimePlan?.model ?? "No model selected"}</p>
-              <div className="runtime-row">
-                <span className={runtimePlan?.ready ? "ready-pill" : "blocked-pill"}>
-                  {runtimePlan?.ready ? "Ready" : "Blocked"}
-                </span>
-                <small>{runtimePlan?.missingConfiguration.join(", ") || snapshot.rigMarker}</small>
               </div>
             </section>
           </div>
