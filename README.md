@@ -7,13 +7,18 @@ Essentio is a Tauri 2 desktop application for creating local-first AI agents, st
 - React + TypeScript desktop UI with a dark Nothing-inspired theme.
 - Rust core module boundaries for agents, tools, skills, memory, LLMs, MCP, browser runs, and persistence.
 - SQLite state persisted in the Tauri app data directory.
-- Editable agent system instructions, provider, and model.
+- LLM providers configured from the UI (API keys and base URLs stored locally).
+- Custom agent creation with system instructions, provider, and model selection.
+- Session-based chat interface with persisted message history.
+- File records and long-term agent memory tables.
 - Saved notes and browser run drafts.
-- Rig-backed LLM prompt execution through the `run_agent_prompt` Tauri command.
+- Rig-backed LLM prompt execution through Tauri commands.
 
 ## LLM Providers
 
-The app reads provider credentials from environment variables:
+Providers are configured from the **Providers** view in the app. Credentials are stored in the local SQLite database.
+
+Environment variables are still supported as a fallback when a provider has not been saved in the UI:
 
 - OpenAI: `OPENAI_API_KEY`, optional `OPENAI_BASE_URL`
 - OpenRouter: `OPENROUTER_API_KEY`
@@ -68,7 +73,6 @@ On first launch after upgrading from the early JSON prototype, Essentio imports 
 
 ## Next Slices
 
-- File records, sessions, and long-term memory tables.
 - CDP browser controller for navigation, DOM inspection, field filling, and PDF upload.
 - MCP server config, discovery, and tool invocation.
 - Agent skills loaded from local folders and injected into Rig context.

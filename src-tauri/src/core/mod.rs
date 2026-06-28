@@ -3,6 +3,7 @@ pub mod browser;
 pub mod llm;
 pub mod mcp;
 pub mod memory;
+pub mod sessions;
 pub mod skills;
 pub mod store;
 pub mod tools;

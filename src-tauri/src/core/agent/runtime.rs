@@ -5,7 +5,7 @@ use rig_core::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::core::agent::AgentProfile;
+use crate::core::{agent::AgentProfile, llm::StoredProvider};
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -38,8 +38,8 @@ pub struct AgentPromptResponse {
     pub runtime_plan: RuntimePlan,
 }
 
-pub fn build_runtime_plan(agent: &AgentProfile) -> RuntimePlan {
-    let missing_configuration = missing_configuration(&agent.provider_id);
+pub fn build_runtime_plan(agent: &AgentProfile, providers: &[StoredProvider]) -> RuntimePlan {
+    let missing_configuration = crate::core::llm::missing_configuration(&agent.provider_id, providers);
 
     RuntimePlan {
         agent_id: agent.id.clone(),
@@ -56,6 +56,7 @@ pub fn build_runtime_plan(agent: &AgentProfile) -> RuntimePlan {
 
 pub async fn run_agent_prompt(
     agent: &AgentProfile,
+    providers: &[StoredProvider],
     request: AgentPromptRequest,
 ) -> Result<AgentPromptResponse, String> {
     if request.prompt.trim().is_empty() {
@@ -69,7 +70,7 @@ pub async fn run_agent_prompt(
         ));
     }
 
-    let runtime_plan = build_runtime_plan(agent);
+    let runtime_plan = build_runtime_plan(agent, providers);
     if !runtime_plan.ready {
         return Err(format!(
             "agent runtime is missing configuration: {}",
@@ -77,14 +78,8 @@ pub async fn run_agent_prompt(
         ));
     }
 
-    let output = match agent.provider_id.as_str() {
-        "openai" => run_openai(agent, &request.prompt).await,
-        "anthropic" => run_anthropic(agent, &request.prompt).await,
-        "openrouter" => run_openrouter(agent, &request.prompt).await,
-        "ollama" => run_ollama(agent, &request.prompt).await,
-        "lmstudio" => run_lmstudio(agent, &request.prompt).await,
-        provider => Err(format!("unsupported provider: {provider}")),
-    }?;
+    let provider = crate::core::llm::resolve_provider(&agent.provider_id, providers);
+    let output = run_agent_prompt_with_provider(agent, provider, &request.prompt).await?;
 
     Ok(AgentPromptResponse {
         agent_id: agent.id.clone(),
@@ -95,8 +90,36 @@ pub async fn run_agent_prompt(
     })
 }
 
-async fn run_openai(agent: &AgentProfile, prompt: &str) -> Result<String, String> {
-    let client = openai::Client::from_env().map_err(|error| error.to_string())?;
+pub async fn run_agent_prompt_with_provider(
+    agent: &AgentProfile,
+    provider: Option<&StoredProvider>,
+    prompt: &str,
+) -> Result<String, String> {
+    match agent.provider_id.as_str() {
+        "openai" => run_openai(agent, provider, prompt).await,
+        "anthropic" => run_anthropic(agent, provider, prompt).await,
+        "openrouter" => run_openrouter(agent, provider, prompt).await,
+        "ollama" => run_ollama(agent, provider, prompt).await,
+        "lmstudio" => run_lmstudio(agent, provider, prompt).await,
+        provider_id => Err(format!("unsupported provider: {provider_id}")),
+    }
+}
+
+async fn run_openai(
+    agent: &AgentProfile,
+    provider: Option<&StoredProvider>,
+    prompt: &str,
+) -> Result<String, String> {
+    let client = if let Some(config) = provider.and_then(openai_api_key) {
+        let mut builder = openai::Client::builder().api_key(config);
+        if let Some(base_url) = provider.and_then(|item| item.base_url.as_deref()) {
+            builder = builder.base_url(base_url);
+        }
+        builder.build().map_err(|error| error.to_string())?
+    } else {
+        openai::Client::from_env().map_err(|error| error.to_string())?
+    };
+
     client
         .agent(&agent.model)
         .preamble(&agent.system_instructions)
@@ -106,8 +129,20 @@ async fn run_openai(agent: &AgentProfile, prompt: &str) -> Result<String, String
         .map_err(|error| error.to_string())
 }
 
-async fn run_anthropic(agent: &AgentProfile, prompt: &str) -> Result<String, String> {
-    let client = anthropic::Client::from_env().map_err(|error| error.to_string())?;
+async fn run_anthropic(
+    agent: &AgentProfile,
+    provider: Option<&StoredProvider>,
+    prompt: &str,
+) -> Result<String, String> {
+    let client = if let Some(api_key) = provider.and_then(cloud_api_key) {
+        anthropic::Client::builder()
+            .api_key(api_key)
+            .build()
+            .map_err(|error| error.to_string())?
+    } else {
+        anthropic::Client::from_env().map_err(|error| error.to_string())?
+    };
+
     client
         .agent(&agent.model)
         .preamble(&agent.system_instructions)
@@ -117,8 +152,20 @@ async fn run_anthropic(agent: &AgentProfile, prompt: &str) -> Result<String, Str
         .map_err(|error| error.to_string())
 }
 
-async fn run_openrouter(agent: &AgentProfile, prompt: &str) -> Result<String, String> {
-    let client = openrouter::Client::from_env().map_err(|error| error.to_string())?;
+async fn run_openrouter(
+    agent: &AgentProfile,
+    provider: Option<&StoredProvider>,
+    prompt: &str,
+) -> Result<String, String> {
+    let client = if let Some(api_key) = provider.and_then(cloud_api_key) {
+        openrouter::Client::builder()
+            .api_key(api_key)
+            .build()
+            .map_err(|error| error.to_string())?
+    } else {
+        openrouter::Client::from_env().map_err(|error| error.to_string())?
+    };
+
     client
         .agent(&agent.model)
         .preamble(&agent.system_instructions)
@@ -128,8 +175,27 @@ async fn run_openrouter(agent: &AgentProfile, prompt: &str) -> Result<String, St
         .map_err(|error| error.to_string())
 }
 
-async fn run_ollama(agent: &AgentProfile, prompt: &str) -> Result<String, String> {
-    let client = ollama::Client::from_env().map_err(|error| error.to_string())?;
+async fn run_ollama(
+    agent: &AgentProfile,
+    provider: Option<&StoredProvider>,
+    prompt: &str,
+) -> Result<String, String> {
+    let client = if let Some(base_url) = provider
+        .and_then(|item| item.base_url.as_deref())
+        .filter(|url| !url.trim().is_empty())
+    {
+        let api_key = provider
+            .and_then(|item| item.api_key.as_deref())
+            .unwrap_or("");
+        ollama::Client::builder()
+            .api_key(api_key)
+            .base_url(base_url)
+            .build()
+            .map_err(|error| error.to_string())?
+    } else {
+        ollama::Client::from_env().map_err(|error| error.to_string())?
+    };
+
     client
         .agent(&agent.model)
         .preamble(&agent.system_instructions)
@@ -139,10 +205,20 @@ async fn run_ollama(agent: &AgentProfile, prompt: &str) -> Result<String, String
         .map_err(|error| error.to_string())
 }
 
-async fn run_lmstudio(agent: &AgentProfile, prompt: &str) -> Result<String, String> {
-    let base_url = std::env::var("LMSTUDIO_BASE_URL")
-        .unwrap_or_else(|_| "http://localhost:1234/v1".to_string());
-    let api_key = std::env::var("LMSTUDIO_API_KEY").unwrap_or_else(|_| "lm-studio".to_string());
+async fn run_lmstudio(
+    agent: &AgentProfile,
+    provider: Option<&StoredProvider>,
+    prompt: &str,
+) -> Result<String, String> {
+    let base_url = provider
+        .and_then(|item| item.base_url.clone())
+        .or_else(|| std::env::var("LMSTUDIO_BASE_URL").ok())
+        .unwrap_or_else(|| "http://localhost:1234/v1".to_string());
+    let api_key = provider
+        .and_then(cloud_api_key)
+        .or_else(|| std::env::var("LMSTUDIO_API_KEY").ok())
+        .unwrap_or_else(|| "lm-studio".to_string());
+
     let client = openai::CompletionsClient::builder()
         .api_key(&api_key)
         .base_url(&base_url)
@@ -158,6 +234,18 @@ async fn run_lmstudio(agent: &AgentProfile, prompt: &str) -> Result<String, Stri
         .map_err(|error| error.to_string())
 }
 
+fn cloud_api_key(provider: &StoredProvider) -> Option<String> {
+    provider
+        .api_key
+        .as_ref()
+        .filter(|key| !key.trim().is_empty())
+        .cloned()
+}
+
+fn openai_api_key(provider: &StoredProvider) -> Option<&str> {
+    provider.api_key.as_deref().filter(|key| !key.trim().is_empty())
+}
+
 fn rig_provider_name(provider_id: &str) -> &'static str {
     match provider_id {
         "anthropic" => "rig_core::providers::anthropic",
@@ -166,24 +254,6 @@ fn rig_provider_name(provider_id: &str) -> &'static str {
         "openai" => "rig_core::providers::openai",
         "lmstudio" => "rig_core::providers::openai::CompletionsClient",
         _ => "unsupported",
-    }
-}
-
-fn missing_configuration(provider_id: &str) -> Vec<String> {
-    match provider_id {
-        "openai" => missing_env("OPENAI_API_KEY"),
-        "anthropic" => missing_env("ANTHROPIC_API_KEY"),
-        "openrouter" => missing_env("OPENROUTER_API_KEY"),
-        "ollama" => Vec::new(),
-        "lmstudio" => Vec::new(),
-        _ => vec!["supported provider".to_string()],
-    }
-}
-
-fn missing_env(key: &str) -> Vec<String> {
-    match std::env::var(key) {
-        Ok(value) if !value.trim().is_empty() => Vec::new(),
-        _ => vec![key.to_string()],
     }
 }
 
