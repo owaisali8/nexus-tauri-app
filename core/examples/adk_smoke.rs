@@ -91,7 +91,47 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(stored[0].role, "user");
     assert_eq!(stored[1].role, "assistant");
 
-    println!("\nOK — ADK engine streaming and persistence verified.");
+    // Regression: ADK's own transport buffers on a bare `<` or `[` (partial
+    // tool-call markers) and flushes after turn_complete, silently dropping
+    // everything after the first one. See engine/adk/model.rs.
+    println!("\n== bracket regression ==");
+    let mut opts = RunOptions::new("lmstudio-local", &model.id);
+    opts.system_prompt = Some("You are a Rust expert. Answer directly.".to_string());
+    opts.temperature = Some(0.3);
+
+    let bracket_session =
+        store.create_session("brackets", "lmstudio-local", &model.id, EngineKind::Adk)?;
+    let mut stream = engine
+        .run_stream(
+            bracket_session.id.into(),
+            UserInput::text(
+                "Explain Rust generics in two sentences. \
+                 Mention Vec<T> and #[derive(Debug)] explicitly.",
+            ),
+            opts,
+        )
+        .await?;
+
+    let mut bracket_text = String::new();
+    while let Some(event) = stream.next().await {
+        if let EngineEvent::Token { text: chunk } = event {
+            bracket_text.push_str(&chunk);
+        }
+    }
+
+    let angles = bracket_text.matches('<').count();
+    let squares = bracket_text.matches('[').count();
+    println!("  chars     : {}", bracket_text.len());
+    println!("  '<' count : {angles}");
+    println!("  '[' count : {squares}");
+    println!("  text      : {bracket_text}");
+
+    assert!(
+        angles > 0 || squares > 0,
+        "no angle or square brackets survived the stream — ADK tail-loss has regressed"
+    );
+
+    println!("\nOK — ADK streaming, persistence, and bracket handling verified.");
 
     Ok(())
 }

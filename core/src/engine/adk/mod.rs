@@ -5,21 +5,21 @@
 //! swapping engines cheap. `core/tests/adk_boundary.rs` enforces this.
 
 mod event_map;
+mod model;
 
 use std::{collections::HashMap, sync::Arc};
 
 use adk_agent::LlmAgentBuilder;
 use adk_core::{Content, Event, Part, UserId};
-use adk_model::openai::{OpenAIClient, OpenAIConfig};
 use adk_runner::Runner;
 use adk_session::{CreateRequest, GetRequest, InMemorySessionService, SessionService};
 use futures::{StreamExt, stream::BoxStream};
 
 use crate::{
     Error, Result,
-    engine::{AgentEngine, EngineEvent, RunOptions, SessionId, UserInput},
+    engine::{AgentEngine, EngineEvent, RunOptions, SessionId, UserInput, adk::model::CompatModel},
     memory::Store,
-    providers::{LOCAL_PLACEHOLDER_KEY, ProviderConfig, ProviderKind},
+    providers::{ProviderConfig, ProviderKind},
 };
 
 const APP_NAME: &str = "essentio";
@@ -49,38 +49,28 @@ impl AdkEngine {
         }
     }
 
-    /// Build the ADK model client for this provider.
+    /// Build the model ADK will drive.
     ///
-    /// Only OpenAI-compatible endpoints are wired for now — that covers
-    /// LM Studio, Ollama and vLLM, which is what the app is built against.
-    /// Cloud kinds land when their DoD does.
-    fn model(&self, model_name: &str) -> Result<OpenAIClient> {
+    /// This is [`CompatModel`], our own transport, not `adk_model`'s OpenAI
+    /// client — see `model.rs` for the data-loss bug that makes ADK's
+    /// transport unusable for text containing `<` or `[`.
+    fn model(&self, model_name: &str) -> Result<CompatModel> {
         match self.provider.kind {
             ProviderKind::OpenAiCompatible => {
-                let base_url = self.provider.effective_base_url().ok_or_else(|| {
-                    Error::ProviderMisconfigured {
-                        provider_id: self.provider.id.clone(),
-                        reason: "base_url is required".to_string(),
-                    }
-                })?;
-                let api_key = self
-                    .api_key
-                    .clone()
-                    .unwrap_or_else(|| LOCAL_PLACEHOLDER_KEY.to_string());
-
-                OpenAIClient::new(OpenAIConfig::compatible(api_key, base_url, model_name))
-                    .map_err(|error| Error::Engine(error.to_string()))
-            }
-            ProviderKind::OpenAi => {
-                let api_key = self
-                    .api_key
-                    .clone()
+                // Validate up front so a missing base_url fails here rather
+                // than mid-stream.
+                self.provider
+                    .effective_base_url()
                     .ok_or_else(|| Error::ProviderMisconfigured {
                         provider_id: self.provider.id.clone(),
-                        reason: "an API key is required".to_string(),
+                        reason: "base_url is required".to_string(),
                     })?;
-                OpenAIClient::new(OpenAIConfig::new(api_key, model_name))
-                    .map_err(|error| Error::Engine(error.to_string()))
+
+                Ok(CompatModel::new(
+                    self.provider.clone(),
+                    self.api_key.clone(),
+                    model_name,
+                ))
             }
             other => Err(Error::Engine(format!(
                 "provider kind {other:?} is not wired into the ADK engine yet"
