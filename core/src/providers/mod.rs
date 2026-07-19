@@ -4,6 +4,8 @@
 //! keychain entry; the secret is fetched at use time and is not serialized to
 //! disk, logs, or the frontend.
 
+pub mod openai_compat;
+
 use serde::{Deserialize, Serialize};
 
 use crate::{Error, Result};
