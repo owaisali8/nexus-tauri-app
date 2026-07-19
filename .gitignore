@@ -7,11 +7,25 @@ yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
 
+# Node
 node_modules
 dist
 dist-ssr
-src-tauri/target
 *.local
+
+# Rust — workspace root target, plus any per-crate target/
+/target
+target/
+
+# Tauri generated
+tauri-app/gen/schemas
+
+# Secrets — never commit. API keys belong in the OS keychain.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
 
 # Editor directories and files
 .vscode/*

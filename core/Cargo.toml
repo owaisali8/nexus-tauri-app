@@ -1,0 +1,25 @@
+[package]
+# NOT `core` — that shadows Rust's built-in `core` crate and breaks any derive
+# macro that expands to a `core::` path (thiserror, serde). Directory stays
+# `core/` to match the architecture doc.
+name = "essentio-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Engine-agnostic product logic for the AI workspace"
+
+[lib]
+name = "essentio_core"
+path = "src/lib.rs"
+
+[dependencies]
+async-trait.workspace = true
+futures.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros"] }
