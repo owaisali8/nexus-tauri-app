@@ -1,0 +1,93 @@
+/*
+ * Design tokens.
+ *
+ * The single source of truth for colour, type, spacing and motion. Components
+ * reference these variables and never hard-code a raw value, so retheming and
+ * the Phase 5 light mode are one file, not a sweep.
+ */
+
+:root {
+  /* Type */
+  --font-sans: "Inter", "Plus Jakarta Sans", ui-sans-serif, system-ui, -apple-system, sans-serif;
+  --font-display: "Outfit", "Plus Jakarta Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+
+  --text-xs: 0.75rem;
+  --text-sm: 0.8125rem;
+  --text-base: 0.9375rem;
+  --text-lg: 1.125rem;
+  --text-xl: 1.5rem;
+
+  /* Spacing — 4px base */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+  --space-7: 48px;
+
+  /* Radius */
+  --radius-sm: 12px;
+  --radius-md: 16px;
+  --radius-lg: 24px;
+
+  /* Motion */
+  --ease: cubic-bezier(0.4, 0, 0.2, 1);
+  --duration-fast: 0.15s;
+  --duration-base: 0.25s;
+}
+
+/* Dark is the default surface. */
+:root,
+:root[data-theme="dark"] {
+  --bg-root: #09090b;
+  --bg-elevated: rgba(24, 24, 27, 0.6);
+  --bg-panel: rgba(24, 24, 27, 0.75);
+  --bg-input: rgba(255, 255, 255, 0.05);
+
+  --border: rgba(255, 255, 255, 0.08);
+  --border-strong: rgba(255, 255, 255, 0.15);
+
+  --text: #fafafa;
+  --text-muted: #a1a1aa;
+  --text-subtle: #71717a;
+
+  --accent: #6366f1;
+  --accent-soft: rgba(99, 102, 241, 0.15);
+  --accent-glow: rgba(99, 102, 241, 0.25);
+  --accent-hover: #818cf8;
+
+  --danger: #f87171;
+  --danger-soft: rgba(248, 113, 113, 0.12);
+  --success: #4ade80;
+
+  --shadow-panel: 0 24px 48px rgba(0, 0, 0, 0.4);
+  --shadow-glow: 0 0 32px rgba(99, 102, 241, 0.2);
+}
+
+:root[data-theme="light"] {
+  --bg-root: #fafafa;
+  --bg-elevated: rgba(255, 255, 255, 0.8);
+  --bg-panel: rgba(255, 255, 255, 0.9);
+  --bg-input: rgba(0, 0, 0, 0.04);
+
+  --border: rgba(0, 0, 0, 0.08);
+  --border-strong: rgba(0, 0, 0, 0.15);
+
+  --text: #18181b;
+  --text-muted: #52525b;
+  --text-subtle: #71717a;
+
+  --accent: #4f46e5;
+  --accent-soft: rgba(79, 70, 229, 0.12);
+  --accent-glow: rgba(79, 70, 229, 0.2);
+  --accent-hover: #4338ca;
+
+  --danger: #dc2626;
+  --danger-soft: rgba(220, 38, 38, 0.1);
+  --success: #16a34a;
+
+  --shadow-panel: 0 24px 48px rgba(0, 0, 0, 0.08);
+  --shadow-glow: 0 0 32px rgba(79, 70, 229, 0.12);
+}
