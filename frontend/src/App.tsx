@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   type ChatMessage,
   type EngineEvent,
+  type EngineKind,
   type ModelInfo,
   type ProviderView,
   type Usage,
@@ -36,6 +37,11 @@ export default function App() {
   const [input, setInput] = useState("");
   const [isStreaming, setIsStreaming] = useState(false);
   const [usage, setUsage] = useState<Usage | null>(null);
+  const [engine, setEngine] = useState<EngineKind>("direct");
+
+  // Conversation state lives in the Rust engine keyed by this id. Changing
+  // engines starts a fresh session, since the two do not share history.
+  const [sessionId, setSessionId] = useState(() => crypto.randomUUID());
 
   const cancelRef = useRef<(() => void) | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
@@ -95,9 +101,6 @@ export default function App() {
 
     const userTurn: Turn = { id: newId(), role: "user", content: text };
     const assistantId = newId();
-    const history: ChatMessage[] = [...turns, userTurn].map(
-      ({ role, content }) => ({ role, content }),
-    );
 
     setTurns((current) => [
       ...current,
@@ -128,7 +131,7 @@ export default function App() {
     };
 
     cancelRef.current = runStream(
-      { providerId, model, messages: history, temperature: 0.7 },
+      { sessionId, providerId, model, prompt: text, temperature: 0.7, engine },
       (event: EngineEvent) => {
         switch (event.type) {
           case "token":
@@ -147,7 +150,7 @@ export default function App() {
         }
       },
     );
-  }, [input, isStreaming, providerId, model, turns]);
+  }, [input, isStreaming, providerId, model, sessionId, engine]);
 
   const canSend = Boolean(input.trim() && !isStreaming && providerId && model);
 
@@ -194,6 +197,26 @@ export default function App() {
             ) : (
               <option value="">—</option>
             )}
+          </select>
+        </label>
+
+        <label className="field">
+          <span className="field__label">Engine</span>
+          <select
+            className="field__control field__control--narrow"
+            value={engine}
+            disabled={isStreaming}
+            onChange={(event) => {
+              setEngine(event.target.value as EngineKind);
+              // Engines keep separate history, so switching starts a new
+              // conversation rather than silently losing context.
+              setSessionId(crypto.randomUUID());
+              setTurns([]);
+              setUsage(null);
+            }}
+          >
+            <option value="direct">Direct</option>
+            <option value="adk">ADK</option>
           </select>
         </label>
 

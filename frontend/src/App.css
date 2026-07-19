@@ -117,6 +117,10 @@ textarea {
   transition: border-color var(--duration-fast) var(--ease);
 }
 
+.field__control--narrow {
+  min-width: 96px;
+}
+
 .field__control:hover:not(:disabled) {
   border-color: var(--border-strong);
 }

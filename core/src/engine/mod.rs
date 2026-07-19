@@ -5,10 +5,42 @@
 //! against these DTOs and flipping a factory — the UI, persistence, RAG and
 //! tool layers are untouched.
 
+pub mod adk;
+pub mod direct;
+
+use std::sync::Arc;
+
 use futures::stream::BoxStream;
 use serde::{Deserialize, Serialize};
 
-use crate::Result;
+use crate::{Result, providers::ProviderConfig};
+
+/// Which engine implementation to run a turn through.
+///
+/// This is the swap point the architecture is built around: adding an engine
+/// means a new variant and a new arm in [`build_engine`], with nothing else in
+/// the app touched.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EngineKind {
+    /// Streamed completions with no agent framework.
+    #[default]
+    Direct,
+    /// ADK-Rust: tool loops, sub-agents, workflow agents.
+    Adk,
+}
+
+/// Construct an engine for a provider.
+pub fn build_engine(
+    kind: EngineKind,
+    provider: ProviderConfig,
+    api_key: Option<String>,
+) -> Arc<dyn AgentEngine> {
+    match kind {
+        EngineKind::Direct => Arc::new(direct::DirectEngine::new(provider, api_key)),
+        EngineKind::Adk => Arc::new(adk::AdkEngine::new(provider, api_key)),
+    }
+}
 
 /// Opaque identifier for a conversation.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]

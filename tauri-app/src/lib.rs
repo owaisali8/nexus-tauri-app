@@ -13,10 +13,10 @@ use std::{
 };
 
 use essentio_core::{
-    engine::EngineEvent,
+    engine::{AgentEngine, EngineEvent, EngineKind, RunOptions, UserInput, build_engine},
     providers::{
         ProviderConfig, ProviderKind,
-        openai_compat::{ChatMessage, ModelInfo, OpenAiCompatClient},
+        openai_compat::{ModelInfo, OpenAiCompatClient},
     },
 };
 use futures::StreamExt;
@@ -59,6 +59,36 @@ impl RunRegistry {
 #[derive(Default)]
 struct AppState {
     runs: Arc<RunRegistry>,
+    /// Engines are cached per (kind, provider) because they own conversation
+    /// state — rebuilding one per run would silently reset history.
+    engines: Mutex<HashMap<String, Arc<dyn AgentEngine>>>,
+}
+
+impl AppState {
+    fn engine(
+        &self,
+        kind: EngineKind,
+        provider: &ProviderConfig,
+        api_key: Option<String>,
+    ) -> Result<Arc<dyn AgentEngine>, String> {
+        let cache_key = format!("{kind:?}:{}", provider.id);
+        let mut engines = self
+            .engines
+            .lock()
+            .map_err(|_| "engine cache poisoned".to_string())?;
+
+        Ok(engines
+            .entry(cache_key)
+            .or_insert_with(|| build_engine(kind, provider.clone(), api_key))
+            .clone())
+    }
+
+    /// Drop cached engines for a provider so config edits take effect.
+    fn invalidate_engines(&self, provider_id: &str) {
+        if let Ok(mut engines) = self.engines.lock() {
+            engines.retain(|key, _| !key.ends_with(&format!(":{provider_id}")));
+        }
+    }
 }
 
 /// Provider config plus a write-only secret field.
@@ -88,11 +118,18 @@ struct ProviderView {
 #[serde(rename_all = "camelCase")]
 struct RunStreamRequest {
     run_id: String,
+    session_id: String,
     provider_id: String,
     model: String,
-    messages: Vec<ChatMessage>,
+    /// The new user turn only. Prior turns live in the engine, keyed by
+    /// `session_id` — the UI does not resend the transcript.
+    prompt: String,
+    #[serde(default)]
+    system_prompt: Option<String>,
     #[serde(default)]
     temperature: Option<f32>,
+    #[serde(default)]
+    engine: EngineKind,
 }
 
 fn app_data_dir(app: &AppHandle) -> Result<PathBuf, String> {
@@ -160,7 +197,11 @@ fn list_providers(app: AppHandle) -> Result<Vec<ProviderView>, String> {
 }
 
 #[tauri::command]
-fn save_provider(app: AppHandle, request: SaveProviderRequest) -> Result<ProviderView, String> {
+fn save_provider(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    request: SaveProviderRequest,
+) -> Result<ProviderView, String> {
     let SaveProviderRequest {
         mut config,
         api_key,
@@ -193,6 +234,7 @@ fn save_provider(app: AppHandle, request: SaveProviderRequest) -> Result<Provide
         None => providers.push(config.clone()),
     }
     write_providers(&app, &providers)?;
+    state.invalidate_engines(&config.id);
 
     Ok(ProviderView {
         config,
@@ -201,7 +243,11 @@ fn save_provider(app: AppHandle, request: SaveProviderRequest) -> Result<Provide
 }
 
 #[tauri::command]
-fn delete_provider(app: AppHandle, provider_id: String) -> Result<(), String> {
+fn delete_provider(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    provider_id: String,
+) -> Result<(), String> {
     let providers = load_providers(&app)?;
     if let Some(provider) = providers.iter().find(|item| item.id == provider_id)
         && let Some(key_ref) = provider.api_key_ref.as_deref()
@@ -213,7 +259,9 @@ fn delete_provider(app: AppHandle, provider_id: String) -> Result<(), String> {
         .into_iter()
         .filter(|provider| provider.id != provider_id)
         .collect();
-    write_providers(&app, &remaining)
+    write_providers(&app, &remaining)?;
+    state.invalidate_engines(&provider_id);
+    Ok(())
 }
 
 /// `GET /models` — doubles as the "Test connection" action.
@@ -244,17 +292,28 @@ async fn run_stream(
 ) -> Result<(), String> {
     let RunStreamRequest {
         run_id,
+        session_id,
         provider_id,
         model,
-        messages,
+        prompt,
+        system_prompt,
         temperature,
+        engine: engine_kind,
     } = request;
 
     let provider = find_provider(&app, &provider_id)?;
-    let client = client_for(&provider)?;
+    let api_key = match provider.api_key_ref.as_deref() {
+        Some(key_ref) => secrets::get(key_ref)?,
+        None => None,
+    };
+    let engine = state.engine(engine_kind, &provider, api_key)?;
 
-    let stream = client
-        .chat_stream(&model, messages, temperature)
+    let mut opts = RunOptions::new(&provider_id, &model);
+    opts.temperature = temperature;
+    opts.system_prompt = system_prompt;
+
+    let stream = engine
+        .run_stream(session_id.into(), UserInput::text(prompt), opts)
         .await
         .map_err(|error| error.to_string())?;
 

@@ -66,11 +66,21 @@ export function listModels(providerId: string): Promise<ModelInfo[]> {
   return invoke("list_models", { providerId });
 }
 
+/** Which engine implementation runs the turn. Mirrors core's `EngineKind`. */
+export type EngineKind = "direct" | "adk";
+
 export type RunStreamRequest = {
+  sessionId: string;
   providerId: string;
   model: string;
-  messages: ChatMessage[];
+  /**
+   * The new user turn only. Prior turns live in the engine keyed by
+   * `sessionId`; the UI must not resend the transcript.
+   */
+  prompt: string;
+  systemPrompt?: string;
   temperature?: number;
+  engine?: EngineKind;
 };
 
 /**
