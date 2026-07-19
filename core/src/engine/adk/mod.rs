@@ -6,13 +6,13 @@
 
 mod event_map;
 
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use adk_agent::LlmAgentBuilder;
 use adk_core::{Content, Part, UserId};
 use adk_model::openai::{OpenAIClient, OpenAIConfig};
 use adk_runner::Runner;
-use adk_session::InMemorySessionService;
+use adk_session::{CreateRequest, GetRequest, InMemorySessionService, SessionService};
 use futures::{StreamExt, stream::BoxStream};
 
 use crate::{
@@ -82,6 +82,39 @@ impl AdkEngine {
             ))),
         }
     }
+
+    /// Ensure the ADK session exists.
+    ///
+    /// `Runner::run` does *not* create a missing session despite the docs
+    /// saying it retrieves or creates one — it fails the stream with
+    /// "session not found". Creating it up front is the fix.
+    async fn ensure_session(&self, session_id: &str) -> Result<()> {
+        let existing = self
+            .sessions
+            .get(GetRequest {
+                app_name: APP_NAME.to_string(),
+                user_id: DEFAULT_USER.to_string(),
+                session_id: session_id.to_string(),
+                num_recent_events: None,
+                after: None,
+            })
+            .await;
+
+        if existing.is_ok() {
+            return Ok(());
+        }
+
+        self.sessions
+            .create(CreateRequest {
+                app_name: APP_NAME.to_string(),
+                user_id: DEFAULT_USER.to_string(),
+                session_id: Some(session_id.to_string()),
+                state: HashMap::new(),
+            })
+            .await
+            .map(|_| ())
+            .map_err(|error| Error::Engine(error.to_string()))
+    }
 }
 
 #[async_trait::async_trait]
@@ -109,6 +142,8 @@ impl AgentEngine for AdkEngine {
             .build()
             .map_err(|error| Error::Engine(error.to_string()))?;
 
+        self.ensure_session(&session_id.0).await?;
+
         let user_id =
             UserId::new(DEFAULT_USER).map_err(|error| Error::Engine(error.to_string()))?;
         let adk_session = adk_core::SessionId::new(session_id.0.clone())
@@ -126,12 +161,13 @@ impl AgentEngine for AdkEngine {
 
         // Flatten ADK events into EngineEvents. One ADK event can carry several
         // parts (text plus a tool call), so this is a flat_map, not a map.
-        let stream = events
+        //
+        // ADK emits no terminal event of its own, so `ensure_terminal` supplies
+        // one — without overwriting an Error the run already produced.
+        let mapped = events
             .flat_map(|item| futures::stream::iter(event_map::to_engine_events(item)))
-            .chain(futures::stream::once(async {
-                EngineEvent::Done { usage: None }
-            }));
+            .boxed();
 
-        Ok(stream.boxed())
+        Ok(crate::engine::ensure_terminal(mapped))
     }
 }

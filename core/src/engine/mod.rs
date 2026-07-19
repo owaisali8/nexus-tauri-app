@@ -181,6 +181,42 @@ impl EngineEvent {
     }
 }
 
+/// Enforce the stream contract: exactly one terminal event, nothing after it.
+///
+/// Truncates anything following a [`EngineEvent::Done`] or
+/// [`EngineEvent::Error`], and appends a `Done` only if the source produced no
+/// terminal event of its own. Engines whose backend has no completion signal
+/// must route through this — appending `Done` unconditionally would mask a
+/// failed run as a successful one.
+pub fn ensure_terminal(stream: BoxStream<'static, EngineEvent>) -> BoxStream<'static, EngineEvent> {
+    use futures::StreamExt;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+
+    let saw_terminal = Arc::new(AtomicBool::new(false));
+    let seen = Arc::clone(&saw_terminal);
+
+    let body = stream.scan(false, move |finished, event| {
+        if *finished {
+            return futures::future::ready(None);
+        }
+        if event.is_terminal() {
+            *finished = true;
+            seen.store(true, Ordering::SeqCst);
+        }
+        futures::future::ready(Some(event))
+    });
+
+    let tail = futures::stream::iter(std::iter::once(())).filter_map(move |()| {
+        let needs_done = !saw_terminal.load(Ordering::SeqCst);
+        futures::future::ready(needs_done.then_some(EngineEvent::Done { usage: None }))
+    });
+
+    body.chain(tail).boxed()
+}
+
 /// A streamed agent run.
 ///
 /// Cancellation is by dropping the returned stream; implementations must abort
@@ -225,6 +261,53 @@ mod tests {
             }
             other => panic!("unexpected variant: {other:?}"),
         }
+    }
+
+    use futures::StreamExt;
+
+    async fn drain(stream: BoxStream<'static, EngineEvent>) -> Vec<EngineEvent> {
+        stream.collect().await
+    }
+
+    #[tokio::test]
+    async fn ensure_terminal_appends_done_when_missing() {
+        let source = futures::stream::iter(vec![EngineEvent::Token {
+            text: "hi".to_string(),
+        }])
+        .boxed();
+
+        let events = drain(ensure_terminal(source)).await;
+        assert_eq!(events.len(), 2);
+        assert!(events[1].is_terminal());
+    }
+
+    /// Regression: an unconditional `Done` after an `Error` reported a failed
+    /// run as successful, which hid a live "session not found" failure.
+    #[tokio::test]
+    async fn ensure_terminal_does_not_mask_an_error() {
+        let source = futures::stream::iter(vec![EngineEvent::Error {
+            message: "session not found".to_string(),
+        }])
+        .boxed();
+
+        let events = drain(ensure_terminal(source)).await;
+        assert_eq!(events.len(), 1, "no event may follow a terminal Error");
+        assert!(matches!(events[0], EngineEvent::Error { .. }));
+    }
+
+    #[tokio::test]
+    async fn ensure_terminal_truncates_after_the_first_terminal() {
+        let source = futures::stream::iter(vec![
+            EngineEvent::Done { usage: None },
+            EngineEvent::Token {
+                text: "leaked".to_string(),
+            },
+        ])
+        .boxed();
+
+        let events = drain(ensure_terminal(source)).await;
+        assert_eq!(events.len(), 1);
+        assert!(matches!(events[0], EngineEvent::Done { .. }));
     }
 
     #[test]
