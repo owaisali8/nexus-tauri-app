@@ -63,8 +63,14 @@ struct ChatRequest<'a> {
     stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f32>,
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
-    stream_options_include_usage: bool,
+    /// Must be a nested object, not a flattened field — servers silently
+    /// ignore an unrecognised top-level key and report no usage at all.
+    stream_options: StreamOptions,
+}
+
+#[derive(Debug, Serialize)]
+struct StreamOptions {
+    include_usage: bool,
 }
 
 /// One SSE `data:` payload from `/chat/completions` with `stream: true`.
@@ -212,7 +218,9 @@ impl OpenAiCompatClient {
             messages: &messages,
             stream: true,
             temperature,
-            stream_options_include_usage: false,
+            stream_options: StreamOptions {
+                include_usage: true,
+            },
         };
 
         let response = self
@@ -235,34 +243,45 @@ impl OpenAiCompatClient {
 
         let events = response.bytes_stream().eventsource();
 
-        // `scan` carries a `finished` flag so that nothing is emitted after the
-        // terminal event, upholding the contract above.
-        let stream = events.scan(false, |finished, item| {
-            if *finished {
+        // Usage arrives in a trailing chunk *before* `[DONE]`, so it has to be
+        // carried in scan state and attached when the terminal event is built.
+        #[derive(Default)]
+        struct StreamState {
+            finished: bool,
+            usage: Option<Usage>,
+        }
+
+        let stream = events.scan(StreamState::default(), |state, item| {
+            if state.finished {
                 return futures::future::ready(None);
             }
 
             let next = match item {
                 Err(error) => {
-                    *finished = true;
+                    state.finished = true;
                     Some(EngineEvent::Error {
                         message: error.to_string(),
                     })
                 }
                 Ok(event) => {
                     if event.data.trim() == "[DONE]" {
-                        *finished = true;
-                        Some(EngineEvent::Done { usage: None })
+                        state.finished = true;
+                        Some(EngineEvent::Done { usage: state.usage })
                     } else {
                         match parse_chunk(&event.data) {
-                            Ok((Some(text), _)) => Some(EngineEvent::Token { text }),
-                            // Content-free chunk (role opener, usage trailer):
-                            // emit nothing but keep the stream open.
-                            Ok((None, _)) => Some(EngineEvent::Token {
-                                text: String::new(),
-                            }),
+                            Ok((text, usage)) => {
+                                if usage.is_some() {
+                                    state.usage = usage;
+                                }
+                                // Content-free chunks (role opener, usage
+                                // trailer) become empty tokens and are filtered
+                                // out below, keeping the stream open.
+                                Some(EngineEvent::Token {
+                                    text: text.unwrap_or_default(),
+                                })
+                            }
                             Err(error) => {
-                                *finished = true;
+                                state.finished = true;
                                 Some(EngineEvent::Error {
                                     message: format!("malformed stream chunk: {error}"),
                                 })
