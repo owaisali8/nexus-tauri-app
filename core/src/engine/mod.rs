@@ -35,10 +35,11 @@ pub fn build_engine(
     kind: EngineKind,
     provider: ProviderConfig,
     api_key: Option<String>,
+    store: crate::memory::Store,
 ) -> Arc<dyn AgentEngine> {
     match kind {
-        EngineKind::Direct => Arc::new(direct::DirectEngine::new(provider, api_key)),
-        EngineKind::Adk => Arc::new(adk::AdkEngine::new(provider, api_key)),
+        EngineKind::Direct => Arc::new(direct::DirectEngine::new(provider, api_key, store)),
+        EngineKind::Adk => Arc::new(adk::AdkEngine::new(provider, api_key, store)),
     }
 }
 

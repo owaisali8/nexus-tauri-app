@@ -46,6 +46,51 @@ export type EngineEvent =
   | { type: "done"; usage?: Usage | null }
   | { type: "error"; message: string };
 
+export type Session = {
+  id: string;
+  title: string;
+  providerId: string;
+  model: string;
+  engine: EngineKind;
+  createdAt: number;
+  updatedAt: number;
+};
+
+/** A persisted transcript entry. `seq` is the ordering key, not `createdAt`. */
+export type Message = {
+  id: string;
+  sessionId: string;
+  role: "system" | "user" | "assistant";
+  content: string;
+  seq: number;
+  createdAt: number;
+};
+
+export function listSessions(): Promise<Session[]> {
+  return invoke("list_sessions");
+}
+
+export function createSession(request: {
+  title?: string;
+  providerId: string;
+  model: string;
+  engine?: EngineKind;
+}): Promise<Session> {
+  return invoke("create_session", { request });
+}
+
+export function deleteSession(sessionId: string): Promise<void> {
+  return invoke("delete_session", { sessionId });
+}
+
+export function renameSession(sessionId: string, title: string): Promise<void> {
+  return invoke("rename_session", { sessionId, title });
+}
+
+export function getMessages(sessionId: string): Promise<Message[]> {
+  return invoke("get_messages", { sessionId });
+}
+
 export function listProviders(): Promise<ProviderView[]> {
   return invoke("list_providers");
 }

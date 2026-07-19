@@ -7,7 +7,8 @@
 //! ```
 
 use essentio_core::{
-    engine::{AgentEngine, EngineEvent, RunOptions, UserInput, adk::AdkEngine},
+    engine::{AgentEngine, EngineEvent, EngineKind, RunOptions, UserInput, adk::AdkEngine},
+    memory::Store,
     providers::{ProviderConfig, openai_compat::OpenAiCompatClient},
 };
 use futures::StreamExt;
@@ -31,14 +32,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         provider.label, model.id
     );
 
-    let engine = AdkEngine::new(provider, None);
+    // In-memory store: this exercises the engine, not durability.
+    let store = Store::open_in_memory()?;
+    let session = store.create_session("smoke", "lmstudio-local", &model.id, EngineKind::Adk)?;
+    let engine = AdkEngine::new(provider, None, store.clone());
 
     let mut opts = RunOptions::new("lmstudio-local", &model.id);
     opts.system_prompt = Some("You are terse. Answer in one short sentence.".to_string());
 
     let mut stream = engine
         .run_stream(
-            "smoke-session".into(),
+            session.id.clone().into(),
             UserInput::text("What is a Cargo workspace?"),
             opts,
         )
@@ -76,7 +80,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     assert!(!text.is_empty(), "engine produced no assistant text");
     assert!(terminal.is_some(), "stream ended without a terminal event");
-    println!("\nOK — ADK engine streaming verified through the AgentEngine seam.");
+
+    // The transcript should now hold both sides of the turn.
+    let stored = store.load_messages(&session.id)?;
+    println!("  persisted    : {} messages", stored.len());
+    for message in &stored {
+        println!("    [{}] {}", message.role, message.content);
+    }
+    assert_eq!(stored.len(), 2, "expected the user and assistant turns");
+    assert_eq!(stored[0].role, "user");
+    assert_eq!(stored[1].role, "assistant");
+
+    println!("\nOK — ADK engine streaming and persistence verified.");
 
     Ok(())
 }

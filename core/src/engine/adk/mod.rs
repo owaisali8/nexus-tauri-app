@@ -9,7 +9,7 @@ mod event_map;
 use std::{collections::HashMap, sync::Arc};
 
 use adk_agent::LlmAgentBuilder;
-use adk_core::{Content, Part, UserId};
+use adk_core::{Content, Event, Part, UserId};
 use adk_model::openai::{OpenAIClient, OpenAIConfig};
 use adk_runner::Runner;
 use adk_session::{CreateRequest, GetRequest, InMemorySessionService, SessionService};
@@ -18,6 +18,7 @@ use futures::{StreamExt, stream::BoxStream};
 use crate::{
     Error, Result,
     engine::{AgentEngine, EngineEvent, RunOptions, SessionId, UserInput},
+    memory::Store,
     providers::{LOCAL_PLACEHOLDER_KEY, ProviderConfig, ProviderKind},
 };
 
@@ -32,15 +33,19 @@ const DEFAULT_USER: &str = "local";
 pub struct AdkEngine {
     provider: ProviderConfig,
     api_key: Option<String>,
+    /// ADK's own session state. It is a cache, not the source of truth —
+    /// SQLite is, and this is rehydrated from it on first touch after start.
     sessions: Arc<InMemorySessionService>,
+    store: Store,
 }
 
 impl AdkEngine {
-    pub fn new(provider: ProviderConfig, api_key: Option<String>) -> Self {
+    pub fn new(provider: ProviderConfig, api_key: Option<String>, store: Store) -> Self {
         Self {
             provider,
             api_key,
             sessions: Arc::new(InMemorySessionService::new()),
+            store,
         }
     }
 
@@ -83,7 +88,7 @@ impl AdkEngine {
         }
     }
 
-    /// Ensure the ADK session exists.
+    /// Ensure the ADK session exists, rehydrating it from SQLite if new.
     ///
     /// `Runner::run` does *not* create a missing session despite the docs
     /// saying it retrieves or creates one — it fails the stream with
@@ -112,8 +117,38 @@ impl AdkEngine {
                 state: HashMap::new(),
             })
             .await
-            .map(|_| ())
-            .map_err(|error| Error::Engine(error.to_string()))
+            .map_err(|error| Error::Engine(error.to_string()))?;
+
+        // Replay the stored transcript so a session resumed after restart has
+        // its context back. Without this, ADK would start every conversation
+        // blank while the UI showed the full history.
+        for message in self.store.load_messages(session_id)? {
+            let author = if message.role == "user" {
+                "user"
+            } else {
+                AGENT_NAME
+            };
+
+            let mut event = Event::new(format!("hydrate-{}", message.id));
+            event.author = author.to_string();
+            event.set_content(Content {
+                role: if message.role == "user" {
+                    "user".to_string()
+                } else {
+                    "model".to_string()
+                },
+                parts: vec![Part::Text {
+                    text: message.content,
+                }],
+            });
+
+            self.sessions
+                .append_event(session_id, event)
+                .await
+                .map_err(|error| Error::Engine(error.to_string()))?;
+        }
+
+        Ok(())
     }
 }
 
@@ -142,7 +177,11 @@ impl AgentEngine for AdkEngine {
             .build()
             .map_err(|error| Error::Engine(error.to_string()))?;
 
+        // Hydrate before the user turn is persisted, or the replay would
+        // duplicate the message ADK is about to receive as input.
         self.ensure_session(&session_id.0).await?;
+        self.store
+            .append_message(&session_id.0, "user", &input.text)?;
 
         let user_id =
             UserId::new(DEFAULT_USER).map_err(|error| Error::Engine(error.to_string()))?;
@@ -168,6 +207,30 @@ impl AgentEngine for AdkEngine {
             .flat_map(|item| futures::stream::iter(event_map::to_engine_events(item)))
             .boxed();
 
-        Ok(crate::engine::ensure_terminal(mapped))
+        // ADK emits no terminal event of its own, so the Done that signals
+        // "reply complete" is the one ensure_terminal appends. The persist
+        // step must therefore sit downstream of it — upstream it would never
+        // observe a Done and the assistant turn would never be written.
+        let terminated = crate::engine::ensure_terminal(mapped);
+
+        let store = self.store.clone();
+        let key = session_id.0.clone();
+        let mut reply = String::new();
+
+        let persisted = terminated.map(move |event| {
+            match &event {
+                EngineEvent::Token { text } => reply.push_str(text),
+                EngineEvent::Done { .. } if !reply.is_empty() => {
+                    let text = std::mem::take(&mut reply);
+                    if let Err(error) = store.append_message(&key, "assistant", &text) {
+                        tracing::error!(%error, "failed to persist assistant message");
+                    }
+                }
+                _ => {}
+            }
+            event
+        });
+
+        Ok(persisted.boxed())
     }
 }

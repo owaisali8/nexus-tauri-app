@@ -14,6 +14,7 @@ use std::{
 
 use essentio_core::{
     engine::{AgentEngine, EngineEvent, EngineKind, RunOptions, UserInput, build_engine},
+    memory::{Message, Session, Store},
     providers::{
         ProviderConfig, ProviderKind,
         openai_compat::{ModelInfo, OpenAiCompatClient},
@@ -56,15 +57,24 @@ impl RunRegistry {
     }
 }
 
-#[derive(Default)]
 struct AppState {
     runs: Arc<RunRegistry>,
-    /// Engines are cached per (kind, provider) because they own conversation
-    /// state — rebuilding one per run would silently reset history.
+    store: Store,
+    /// Engines are cached per (kind, provider). Transcripts live in SQLite, so
+    /// this is about avoiding rebuild cost — and for ADK, about keeping its
+    /// hydrated session cache warm.
     engines: Mutex<HashMap<String, Arc<dyn AgentEngine>>>,
 }
 
 impl AppState {
+    fn new(store: Store) -> Self {
+        Self {
+            runs: Arc::new(RunRegistry::default()),
+            store,
+            engines: Mutex::new(HashMap::new()),
+        }
+    }
+
     fn engine(
         &self,
         kind: EngineKind,
@@ -79,7 +89,7 @@ impl AppState {
 
         Ok(engines
             .entry(cache_key)
-            .or_insert_with(|| build_engine(kind, provider.clone(), api_key))
+            .or_insert_with(|| build_engine(kind, provider.clone(), api_key, self.store.clone()))
             .clone())
     }
 
@@ -341,18 +351,97 @@ fn cancel_run(state: State<'_, AppState>, run_id: String) -> bool {
     state.runs.abort(&run_id)
 }
 
+#[tauri::command]
+fn list_sessions(state: State<'_, AppState>) -> Result<Vec<Session>, String> {
+    state.store.list_sessions().map_err(|e| e.to_string())
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CreateSessionRequest {
+    #[serde(default)]
+    title: Option<String>,
+    provider_id: String,
+    model: String,
+    #[serde(default)]
+    engine: EngineKind,
+}
+
+#[tauri::command]
+fn create_session(
+    state: State<'_, AppState>,
+    request: CreateSessionRequest,
+) -> Result<Session, String> {
+    let title = request
+        .title
+        .as_deref()
+        .map(str::trim)
+        .filter(|title| !title.is_empty())
+        .unwrap_or("New chat");
+
+    state
+        .store
+        .create_session(title, &request.provider_id, &request.model, request.engine)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn delete_session(state: State<'_, AppState>, session_id: String) -> Result<(), String> {
+    state
+        .store
+        .delete_session(&session_id)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn rename_session(
+    state: State<'_, AppState>,
+    session_id: String,
+    title: String,
+) -> Result<(), String> {
+    if title.trim().is_empty() {
+        return Err("title cannot be empty".to_string());
+    }
+    state
+        .store
+        .rename_session(&session_id, title.trim())
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_messages(state: State<'_, AppState>, session_id: String) -> Result<Vec<Message>, String> {
+    state
+        .store
+        .load_messages(&session_id)
+        .map_err(|e| e.to_string())
+}
+
+const DB_FILE: &str = "essentio.sqlite3";
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .manage(AppState::default())
+        .setup(|app| {
+            // The store needs the resolved app data dir, so it is built here
+            // rather than in a Default impl.
+            let path = app_data_dir(app.handle())?.join(DB_FILE);
+            let store = Store::open(&path)?;
+            app.manage(AppState::new(store));
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             list_providers,
             save_provider,
             delete_provider,
             list_models,
             run_stream,
-            cancel_run
+            cancel_run,
+            list_sessions,
+            create_session,
+            delete_session,
+            rename_session,
+            get_messages
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
