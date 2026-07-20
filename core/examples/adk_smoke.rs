@@ -9,7 +9,7 @@
 use essentio_core::{
     engine::{AgentEngine, EngineEvent, EngineKind, RunOptions, UserInput, adk::AdkEngine},
     memory::Store,
-    providers::{ProviderConfig, openai_compat::OpenAiCompatClient},
+    providers::{ChatTransport, ProviderConfig, openai_compat::OpenAiCompatClient},
 };
 use futures::StreamExt;
 use std::io::Write;

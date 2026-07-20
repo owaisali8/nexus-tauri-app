@@ -4,17 +4,103 @@
 //! keychain entry; the secret is fetched at use time and is not serialized to
 //! disk, logs, or the frontend.
 
+pub mod anthropic;
+pub mod gemini;
 pub mod openai_compat;
 
+use std::sync::Arc;
+
+use futures::stream::BoxStream;
 use serde::{Deserialize, Serialize};
 
-use crate::{Error, Result};
+use crate::{Error, Result, engine::EngineEvent};
+
+/// Re-exported so callers depend on `providers::ChatMessage` rather than on
+/// the OpenAI module, which is one transport among several.
+pub use openai_compat::ChatMessage;
 
 /// Default LM Studio OpenAI-compatible endpoint.
 pub const LM_STUDIO_DEFAULT_BASE_URL: &str = "http://localhost:1234/v1";
 
 /// Placeholder credential for local servers that ignore authentication.
 pub const LOCAL_PLACEHOLDER_KEY: &str = "lm-studio";
+
+/// A model advertised by a provider's model-listing endpoint.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelInfo {
+    pub id: String,
+    #[serde(default)]
+    pub owned_by: Option<String>,
+}
+
+/// A provider's chat wire format.
+///
+/// Each implementation owns one API shape — OpenAI-compatible, Anthropic
+/// Messages, Gemini generateContent — and normalizes it onto [`EngineEvent`].
+/// Engines depend on this trait, not on any particular provider.
+#[async_trait::async_trait]
+pub trait ChatTransport: Send + Sync {
+    /// Models the provider reports as available.
+    ///
+    /// Doubles as the connection test, so it must fail rather than return an
+    /// empty list when the endpoint or credential is wrong.
+    async fn list_models(&self) -> Result<Vec<ModelInfo>>;
+
+    /// Stream one completion.
+    ///
+    /// The returned stream must terminate with exactly one
+    /// [`EngineEvent::Done`] or [`EngineEvent::Error`].
+    async fn chat_stream(
+        &self,
+        model: &str,
+        messages: Vec<ChatMessage>,
+        temperature: Option<f32>,
+    ) -> Result<BoxStream<'static, EngineEvent>>;
+}
+
+/// Build the transport for a provider.
+///
+/// `api_key` is the resolved secret from the keychain, or `None` for local
+/// servers that ignore authentication.
+pub fn build_transport(
+    config: &ProviderConfig,
+    api_key: Option<String>,
+) -> Result<Arc<dyn ChatTransport>> {
+    match config.kind {
+        ProviderKind::Anthropic => Ok(Arc::new(anthropic::AnthropicClient::new(config, api_key)?)),
+        ProviderKind::Gemini => Ok(Arc::new(gemini::GeminiClient::new(config, api_key)?)),
+        // OpenAI and DeepSeek both speak the OpenAI wire format; the only
+        // difference is the default base URL, which config already carries.
+        ProviderKind::OpenAi | ProviderKind::DeepSeek | ProviderKind::OpenAiCompatible => Ok(
+            Arc::new(openai_compat::OpenAiCompatClient::new(config, api_key)?),
+        ),
+    }
+}
+
+/// Split a message list into an optional system prompt and the rest.
+///
+/// Anthropic and Gemini both take system instructions as a separate top-level
+/// field rather than a message with `role: "system"`.
+pub(crate) fn split_system(messages: Vec<ChatMessage>) -> (Option<String>, Vec<ChatMessage>) {
+    let mut system = Vec::new();
+    let mut rest = Vec::new();
+
+    for message in messages {
+        if message.role == "system" {
+            system.push(message.content);
+        } else {
+            rest.push(message);
+        }
+    }
+
+    let system = if system.is_empty() {
+        None
+    } else {
+        Some(system.join("\n\n"))
+    };
+
+    (system, rest)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -29,6 +115,10 @@ pub enum ProviderKind {
 
 impl ProviderKind {
     /// Whether a `base_url` is mandatory for this kind.
+    ///
+    /// Only generic OpenAI-compatible servers need one, since there is no
+    /// sensible default for "some endpoint the user is running". The named
+    /// providers fall back to [`ProviderKind::default_base_url`].
     pub fn requires_base_url(&self) -> bool {
         matches!(self, Self::OpenAiCompatible)
     }
@@ -37,6 +127,17 @@ impl ProviderKind {
     /// placeholder, so they are exempt.
     pub fn requires_api_key(&self) -> bool {
         !matches!(self, Self::OpenAiCompatible)
+    }
+
+    /// Endpoint used when a provider has no explicit `base_url`.
+    pub fn default_base_url(&self) -> Option<&'static str> {
+        match self {
+            Self::OpenAi => Some("https://api.openai.com/v1"),
+            Self::DeepSeek => Some("https://api.deepseek.com/v1"),
+            Self::Anthropic => Some("https://api.anthropic.com"),
+            Self::Gemini => Some("https://generativelanguage.googleapis.com"),
+            Self::OpenAiCompatible => None,
+        }
     }
 }
 
@@ -103,12 +204,14 @@ impl ProviderConfig {
         Ok(())
     }
 
-    /// Base URL with surrounding whitespace and any trailing slash removed.
+    /// Base URL with surrounding whitespace and any trailing slash removed,
+    /// falling back to the kind's default when none is configured.
     pub fn effective_base_url(&self) -> Option<&str> {
         self.base_url
             .as_deref()
             .map(|url| url.trim().trim_end_matches('/'))
             .filter(|url| !url.is_empty())
+            .or_else(|| self.kind.default_base_url())
     }
 
     /// Build `{base_url}/{path}` for OpenAI-compatible calls.

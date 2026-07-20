@@ -21,7 +21,7 @@ use crate::{
     Error, Result,
     engine::{AgentEngine, EngineEvent, RunOptions, SessionId, UserInput, adk::model::CompatModel},
     memory::Store,
-    providers::{ProviderConfig, ProviderKind},
+    providers::ProviderConfig,
 };
 
 const APP_NAME: &str = "essentio";
@@ -53,31 +53,13 @@ impl AdkEngine {
 
     /// Build the model ADK will drive.
     ///
-    /// This is [`CompatModel`], our own transport, not `adk_model`'s OpenAI
-    /// client — see `model.rs` for the data-loss bug that makes ADK's
-    /// transport unusable for text containing `<` or `[`.
+    /// This is [`CompatModel`], backed by our own transports rather than
+    /// `adk_model`'s clients — see `model.rs` for the data-loss bug that makes
+    /// ADK's OpenAI transport unusable for text containing `<` or `[`. Going
+    /// through `build_transport` means every provider kind works here, not
+    /// just OpenAI-compatible ones.
     fn model(&self, model_name: &str) -> Result<CompatModel> {
-        match self.provider.kind {
-            ProviderKind::OpenAiCompatible => {
-                // Validate up front so a missing base_url fails here rather
-                // than mid-stream.
-                self.provider
-                    .effective_base_url()
-                    .ok_or_else(|| Error::ProviderMisconfigured {
-                        provider_id: self.provider.id.clone(),
-                        reason: "base_url is required".to_string(),
-                    })?;
-
-                Ok(CompatModel::new(
-                    self.provider.clone(),
-                    self.api_key.clone(),
-                    model_name,
-                ))
-            }
-            other => Err(Error::Engine(format!(
-                "provider kind {other:?} is not wired into the ADK engine yet"
-            ))),
-        }
+        CompatModel::new(&self.provider, self.api_key.clone(), model_name)
     }
 
     /// Ensure the ADK session exists, rehydrating it from SQLite if new.

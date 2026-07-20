@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     Error, Result,
     engine::{EngineEvent, Usage},
-    providers::{LOCAL_PLACEHOLDER_KEY, ProviderConfig},
+    providers::{ChatTransport, LOCAL_PLACEHOLDER_KEY, ModelInfo, ProviderConfig},
 };
 
 /// A chat message in OpenAI wire format.
@@ -41,14 +41,6 @@ impl ChatMessage {
             content: content.into(),
         }
     }
-}
-
-/// A model advertised by `GET /models`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ModelInfo {
-    pub id: String,
-    #[serde(default)]
-    pub owned_by: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -174,9 +166,12 @@ impl OpenAiCompatClient {
     fn url(&self, path: &str) -> String {
         format!("{}/{}", self.base_url, path.trim_start_matches('/'))
     }
+}
 
+#[async_trait::async_trait]
+impl ChatTransport for OpenAiCompatClient {
     /// `GET /models` — powers the model picker and the "Test connection" button.
-    pub async fn list_models(&self) -> Result<Vec<ModelInfo>> {
+    async fn list_models(&self) -> Result<Vec<ModelInfo>> {
         let url = self.url("models");
         let response = self
             .http
@@ -206,7 +201,7 @@ impl OpenAiCompatClient {
     ///
     /// The returned stream always terminates with exactly one
     /// [`EngineEvent::Done`] or [`EngineEvent::Error`].
-    pub async fn chat_stream(
+    async fn chat_stream(
         &self,
         model: &str,
         messages: Vec<ChatMessage>,

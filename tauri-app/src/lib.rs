@@ -17,10 +17,7 @@ use essentio_core::{
         AgentEngine, EngineEvent, EngineKind, RunOptions, SessionId, UserInput, build_engine,
     },
     memory::{Message, Session, Store},
-    providers::{
-        ProviderConfig, ProviderKind,
-        openai_compat::{ModelInfo, OpenAiCompatClient},
-    },
+    providers::{ChatTransport, ModelInfo, ProviderConfig, build_transport},
 };
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
@@ -180,13 +177,17 @@ fn find_provider(app: &AppHandle, provider_id: &str) -> Result<ProviderConfig, S
         .ok_or_else(|| format!("provider not found: {provider_id}"))
 }
 
-/// Build a client for a provider, resolving its secret from the keychain.
-fn client_for(provider: &ProviderConfig) -> Result<OpenAiCompatClient, String> {
-    let api_key = match provider.api_key_ref.as_deref() {
-        Some(key_ref) => secrets::get(key_ref)?,
-        None => None,
-    };
-    OpenAiCompatClient::new(provider, api_key).map_err(|error| error.to_string())
+/// Resolve a provider's secret from the keychain.
+fn api_key_for(provider: &ProviderConfig) -> Result<Option<String>, String> {
+    match provider.api_key_ref.as_deref() {
+        Some(key_ref) => secrets::get(key_ref),
+        None => Ok(None),
+    }
+}
+
+/// Build a transport for a provider, resolving its secret from the keychain.
+fn transport_for(provider: &ProviderConfig) -> Result<Arc<dyn ChatTransport>, String> {
+    build_transport(provider, api_key_for(provider)?).map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -289,18 +290,11 @@ fn delete_provider(
     Ok(())
 }
 
-/// `GET /models` — doubles as the "Test connection" action.
+/// List a provider's models — doubles as the "Test connection" action.
 #[tauri::command]
 async fn list_models(app: AppHandle, provider_id: String) -> Result<Vec<ModelInfo>, String> {
     let provider = find_provider(&app, &provider_id)?;
-    if provider.kind != ProviderKind::OpenAiCompatible {
-        return Err(format!(
-            "model discovery is only implemented for OpenAI-compatible providers, got {:?}",
-            provider.kind
-        ));
-    }
-
-    client_for(&provider)?
+    transport_for(&provider)?
         .list_models()
         .await
         .map_err(|error| error.to_string())
@@ -327,11 +321,7 @@ async fn run_stream(
     } = request;
 
     let provider = find_provider(&app, &provider_id)?;
-    let api_key = match provider.api_key_ref.as_deref() {
-        Some(key_ref) => secrets::get(key_ref)?,
-        None => None,
-    };
-    let engine = state.engine(engine_kind, &provider, api_key)?;
+    let engine = state.engine(engine_kind, &provider, api_key_for(&provider)?)?;
 
     let mut opts = RunOptions::new(&provider_id, &model);
     opts.temperature = temperature;

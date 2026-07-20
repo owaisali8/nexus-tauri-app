@@ -32,31 +32,28 @@ use adk_core::{
 };
 use futures::StreamExt;
 
+use std::sync::Arc;
+
 use crate::{
     engine::EngineEvent,
-    providers::{
-        ProviderConfig,
-        openai_compat::{ChatMessage, OpenAiCompatClient},
-    },
+    providers::{ChatMessage, ChatTransport, ProviderConfig, build_transport},
 };
 
 pub struct CompatModel {
-    provider: ProviderConfig,
-    api_key: Option<String>,
+    transport: Arc<dyn ChatTransport>,
     model: String,
 }
 
 impl CompatModel {
     pub fn new(
-        provider: ProviderConfig,
+        provider: &ProviderConfig,
         api_key: Option<String>,
         model: impl Into<String>,
-    ) -> Self {
-        Self {
-            provider,
-            api_key,
+    ) -> crate::Result<Self> {
+        Ok(Self {
+            transport: build_transport(provider, api_key)?,
             model: model.into(),
-        }
+        })
     }
 }
 
@@ -150,9 +147,6 @@ impl Llm for CompatModel {
             );
         }
 
-        let client = OpenAiCompatClient::new(&self.provider, self.api_key.clone())
-            .map_err(|error| AdkError::model(error.to_string()))?;
-
         let messages = to_chat_messages(&req.contents);
         let temperature = req.config.as_ref().and_then(|config| config.temperature);
         let model = if req.model.is_empty() {
@@ -161,7 +155,8 @@ impl Llm for CompatModel {
             req.model.clone()
         };
 
-        let stream = client
+        let stream = self
+            .transport
             .chat_stream(&model, messages, temperature)
             .await
             .map_err(|error| AdkError::model(error.to_string()))?;

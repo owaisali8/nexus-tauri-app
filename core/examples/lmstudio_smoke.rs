@@ -8,10 +8,7 @@
 
 use essentio_core::{
     engine::EngineEvent,
-    providers::{
-        ProviderConfig,
-        openai_compat::{ChatMessage, OpenAiCompatClient},
-    },
+    providers::{ChatMessage, ChatTransport, ProviderConfig, openai_compat::OpenAiCompatClient},
 };
 use futures::StreamExt;
 use std::io::Write;

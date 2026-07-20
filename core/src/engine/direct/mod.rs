@@ -6,14 +6,13 @@
 
 use futures::{StreamExt, stream::BoxStream};
 
+use std::sync::Arc;
+
 use crate::{
     Result,
     engine::{AgentEngine, EngineEvent, RunOptions, SessionId, UserInput},
     memory::Store,
-    providers::{
-        ProviderConfig,
-        openai_compat::{ChatMessage, OpenAiCompatClient},
-    },
+    providers::{ChatMessage, ChatTransport, ProviderConfig, build_transport},
 };
 
 pub struct DirectEngine {
@@ -32,6 +31,10 @@ impl DirectEngine {
             store,
         }
     }
+
+    fn transport(&self) -> Result<Arc<dyn ChatTransport>> {
+        build_transport(&self.provider, self.api_key.clone())
+    }
 }
 
 #[async_trait::async_trait]
@@ -42,7 +45,7 @@ impl AgentEngine for DirectEngine {
         input: UserInput,
         opts: RunOptions,
     ) -> Result<BoxStream<'static, EngineEvent>> {
-        let client = OpenAiCompatClient::new(&self.provider, self.api_key.clone())?;
+        let transport = self.transport()?;
 
         // Persist the user turn before the request goes out, so a failed or
         // cancelled run still leaves the question in the transcript.
@@ -60,7 +63,7 @@ impl AgentEngine for DirectEngine {
                 .map(super::super::memory::Message::to_chat_message),
         );
 
-        let inner = client
+        let inner = transport
             .chat_stream(&opts.model, messages, opts.temperature)
             .await?;
 

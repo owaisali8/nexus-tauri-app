@@ -3,18 +3,17 @@ import type { ProviderKind } from "../../lib/ipc";
 /**
  * Presets for the "add provider" flow.
  *
- * Every template is `open_ai_compatible` on purpose: OpenAI's own API *is*
- * the OpenAI-compatible wire format, and DeepSeek matches it too, so cloud
- * and local providers share one verified code path. Anthropic and Gemini are
- * deliberately absent — their kinds exist in core but have no transport
- * behind them yet, and offering a preset that cannot work is worse than
- * offering none.
+ * OpenAI and DeepSeek use `open_ai_compatible`: OpenAI's own API *is* that
+ * wire format and DeepSeek matches it, so they share the transport local
+ * servers already use. Anthropic and Gemini have their own wire formats and
+ * their own transports.
  */
 export type ProviderTemplate = {
   /** Stable id used for both the config entry and the keychain ref. */
   id: string;
   label: string;
   kind: ProviderKind;
+  /** Blank means "use the transport's default endpoint". */
   baseUrl: string;
   requiresApiKey: boolean;
   /** Shown under the form to explain setup or where to get a key. */
@@ -45,6 +44,22 @@ export const PROVIDER_TEMPLATES: ProviderTemplate[] = [
     baseUrl: "https://api.openai.com/v1",
     requiresApiKey: true,
     hint: "The key is stored in your OS keychain, never on disk or in this app's config.",
+  },
+  {
+    id: "anthropic",
+    label: "Anthropic",
+    kind: "anthropic",
+    baseUrl: "https://api.anthropic.com",
+    requiresApiKey: true,
+    hint: "Uses the Messages API. The key is stored in your OS keychain, never on disk or in this app's config.",
+  },
+  {
+    id: "gemini",
+    label: "Google Gemini",
+    kind: "gemini",
+    baseUrl: "https://generativelanguage.googleapis.com",
+    requiresApiKey: true,
+    hint: "Uses the Gemini API. The key is sent as a header, never in the URL, and is stored in your OS keychain.",
   },
   {
     id: "deepseek",
