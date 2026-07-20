@@ -1,78 +1,107 @@
 # Essentio
 
-Essentio is a Tauri 2 desktop application for creating local-first AI agents, storing notes/files, and preparing browser automation workflows.
+A local-first AI workspace. Tauri 2 desktop shell, React 19 frontend, Rust core.
 
-## Current Capabilities
+Chat runs against local model servers (LM Studio, Ollama, any OpenAI-compatible
+endpoint) or cloud providers, with conversations stored on your machine.
 
-- React + TypeScript desktop UI with a dark Nothing-inspired theme.
-- Rust core module boundaries for agents, tools, skills, memory, LLMs, MCP, browser runs, and persistence.
-- SQLite state persisted in the Tauri app data directory.
-- LLM providers configured from the UI (API keys and base URLs stored locally).
-- Custom agent creation with system instructions, provider, and model selection.
-- Session-based chat interface with persisted message history.
-- File records and long-term agent memory tables.
-- Saved notes and browser run drafts.
-- Rig-backed LLM prompt execution through Tauri commands.
+## Status
 
-## LLM Providers
+Phase 1 complete: chat, persistence, and provider management work end to end.
+Tools, MCP, RAG and research are not built yet.
 
-Providers are configured from the **Providers** view in the app. Credentials are stored in the local SQLite database.
+| Area | State |
+|---|---|
+| Streaming chat | works |
+| LM Studio / Ollama / OpenAI-compatible | verified live |
+| Google Gemini | verified live |
+| OpenAI / DeepSeek | implemented, not verified against the live API |
+| Anthropic | implemented, **not verified against the live API** |
+| Conversation persistence | works, survives restart |
+| Markdown + syntax highlighting | works |
+| Regenerate, edit-and-resend | works |
+| Tools / MCP / RAG / research | not started |
 
-Environment variables are still supported as a fallback when a provider has not been saved in the UI:
+## Architecture
 
-- OpenAI: `OPENAI_API_KEY`, optional `OPENAI_BASE_URL`
-- OpenRouter: `OPENROUTER_API_KEY`
-- Anthropic: `ANTHROPIC_API_KEY`
-- Ollama: optional `OLLAMA_API_BASE_URL`, optional `OLLAMA_API_KEY`
-- LM Studio: optional `LMSTUDIO_BASE_URL`, optional `LMSTUDIO_API_KEY`
+```
+core/          engine-agnostic product logic
+  engine/      AgentEngine trait + EngineEvent — the one seam engines cross
+    adk/       ADK-Rust implementation (the only place adk_* may be imported)
+    direct/    framework-free implementation over the provider transports
+  providers/   ChatTransport per wire format: openai_compat, anthropic, gemini
+  memory/      SQLite store for sessions, messages, settings
+tauri-app/     shell: commands, streaming channel, OS keychain
+frontend/      React 19 + TypeScript
+```
 
-Default local URLs:
+Two engines implement the same `AgentEngine` trait and are selectable per
+conversation:
 
-- Ollama: `http://localhost:11434`
-- LM Studio: `http://localhost:1234/v1`
+- **Direct** — streamed completions, no agent framework.
+- **ADK** — ADK-Rust's agent loop and session handling, driven through our own
+  transports rather than its built-in ones. See `core/src/engine/adk/model.rs`
+  for why.
+
+`core/tests/adk_boundary.rs` fails the build if any `adk_*` reference appears
+outside `core/src/engine/adk/`, which is what keeps the engine swappable.
+
+## Secrets
+
+API keys live in the **OS keychain** (Windows Credential Manager, macOS
+Keychain, Secret Service on Linux). Provider config on disk stores only the
+name of the keychain entry, never the secret. No key is written to the
+database, to logs, or returned to the frontend.
+
+## Requirements
+
+- Rust (edition 2024; built with 1.96)
+- Node 20+
+- A model source: LM Studio or Ollama running locally, or an API key
 
 ## Development
 
-Install dependencies:
-
 ```bash
-npm install
+# frontend deps
+npm --prefix frontend install
+
+# run the app — from the workspace root, not frontend/
+./frontend/node_modules/.bin/tauri dev
 ```
 
-Run the desktop app:
+The Tauri CLI only searches subdirectories for `tauri.conf.json`, so it has to
+run from the workspace root.
+
+### Gates
+
+All of these must pass before a commit:
 
 ```bash
-npm run tauri dev
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+
+npm --prefix frontend run typecheck
+npm --prefix frontend run lint
+npm --prefix frontend run build
 ```
 
-Build frontend:
+### Live checks
+
+These need LM Studio running and are excluded from `cargo test`:
 
 ```bash
-npm run build
+cargo run -p essentio-core --example lmstudio_smoke   # direct transport
+cargo run -p essentio-core --example adk_smoke        # ADK engine + persistence
 ```
 
-Check Rust:
+`adk_smoke` also guards a regression where ADK's own transport silently
+discarded everything after the first `<` or `[` in a reply.
 
-```bash
-cd src-tauri
-cargo check
-```
+## Data locations
 
-Run Rust tests:
+- Database: `<app data>/workspace.sqlite3`
+- Provider config: `<app data>/providers.json`
+- API keys: OS keychain, service `com.owais.essentio`
 
-```bash
-cd src-tauri
-cargo test
-```
-
-## Persistence
-
-The app stores local data in `essentio.sqlite3` under the Tauri app data directory. Migrations live in `src-tauri/db/migrations`.
-
-On first launch after upgrading from the early JSON prototype, Essentio imports `essentio-state.json` if it exists and the SQLite database is empty.
-
-## Next Slices
-
-- CDP browser controller for navigation, DOM inspection, field filling, and PDF upload.
-- MCP server config, discovery, and tool invocation.
-- Agent skills loaded from local folders and injected into Rig context.
+On Windows `<app data>` is `%APPDATA%\com.owais.essentio`.
