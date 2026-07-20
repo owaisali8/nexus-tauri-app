@@ -91,6 +91,18 @@ export function getMessages(sessionId: string): Promise<Message[]> {
   return invoke("get_messages", { sessionId });
 }
 
+/**
+ * Drop messages at or after `fromSeq` and clear engine-side caches.
+ *
+ * Backs regenerate and edit-and-resend. Resolves with the number removed.
+ */
+export function truncateSession(
+  sessionId: string,
+  fromSeq: number,
+): Promise<number> {
+  return invoke("truncate_session", { sessionId, fromSeq });
+}
+
 export function listProviders(): Promise<ProviderView[]> {
   return invoke("list_providers");
 }

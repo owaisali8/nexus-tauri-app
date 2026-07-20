@@ -381,6 +381,30 @@ impl Store {
         })
     }
 
+    /// Drop every message at or after `from_seq`.
+    ///
+    /// Backs regenerate (truncate the last assistant turn) and edit-and-resend
+    /// (truncate from the edited turn onward). Returns how many were removed.
+    pub fn truncate_from(&self, session_id: &str, from_seq: i64) -> Result<usize> {
+        self.with_connection(|connection| {
+            let removed = connection
+                .execute(
+                    "DELETE FROM messages WHERE session_id = ?1 AND seq >= ?2",
+                    params![session_id, from_seq],
+                )
+                .map_err(db_error)?;
+
+            connection
+                .execute(
+                    "UPDATE sessions SET updated_at = ?2 WHERE id = ?1",
+                    params![session_id, now()],
+                )
+                .map_err(db_error)?;
+
+            Ok(removed)
+        })
+    }
+
     pub fn set_setting(&self, key: &str, value: &str) -> Result<()> {
         self.with_connection(|connection| {
             connection
@@ -497,6 +521,51 @@ mod tests {
 
         let reloaded = store.get_session(&session.id).unwrap().unwrap();
         assert!(reloaded.updated_at >= session.created_at);
+    }
+
+    #[test]
+    fn truncate_removes_the_tail_and_leaves_earlier_turns() {
+        let store = store();
+        let session = store
+            .create_session("s", "p", "m", EngineKind::Direct)
+            .unwrap();
+
+        for index in 0..4 {
+            store
+                .append_message(&session.id, "user", &format!("m{index}"))
+                .unwrap();
+        }
+
+        assert_eq!(store.truncate_from(&session.id, 2).unwrap(), 2);
+
+        let remaining = store.load_messages(&session.id).unwrap();
+        assert_eq!(remaining.len(), 2);
+        assert_eq!(remaining[1].content, "m1");
+    }
+
+    /// After truncating, the next append must not reuse a freed seq in a way
+    /// that collides with the UNIQUE(session_id, seq) constraint.
+    #[test]
+    fn appending_after_truncate_continues_cleanly() {
+        let store = store();
+        let session = store
+            .create_session("s", "p", "m", EngineKind::Direct)
+            .unwrap();
+
+        store.append_message(&session.id, "user", "keep").unwrap();
+        store
+            .append_message(&session.id, "assistant", "drop")
+            .unwrap();
+        store.truncate_from(&session.id, 1).unwrap();
+
+        let replacement = store
+            .append_message(&session.id, "assistant", "regenerated")
+            .unwrap();
+        assert_eq!(replacement.seq, 1);
+
+        let messages = store.load_messages(&session.id).unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[1].content, "regenerated");
     }
 
     #[test]

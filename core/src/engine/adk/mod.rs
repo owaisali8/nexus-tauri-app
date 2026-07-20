@@ -12,7 +12,9 @@ use std::{collections::HashMap, sync::Arc};
 use adk_agent::LlmAgentBuilder;
 use adk_core::{Content, Event, Part, UserId};
 use adk_runner::Runner;
-use adk_session::{CreateRequest, GetRequest, InMemorySessionService, SessionService};
+use adk_session::{
+    CreateRequest, DeleteRequest, GetRequest, InMemorySessionService, SessionService,
+};
 use futures::{StreamExt, stream::BoxStream};
 
 use crate::{
@@ -222,5 +224,29 @@ impl AgentEngine for AdkEngine {
         });
 
         Ok(persisted.boxed())
+    }
+
+    /// Drop ADK's cached session so the next run rehydrates from SQLite.
+    ///
+    /// ADK accumulates its own event list as the conversation proceeds. After
+    /// a regenerate or an edit, that copy still holds the turns the user
+    /// removed, so deleting it is what makes the truncation take effect.
+    async fn forget_session(&self, session_id: &SessionId) -> Result<()> {
+        match self
+            .sessions
+            .delete(DeleteRequest {
+                app_name: APP_NAME.to_string(),
+                user_id: DEFAULT_USER.to_string(),
+                session_id: session_id.0.clone(),
+            })
+            .await
+        {
+            Ok(()) => Ok(()),
+            // Nothing cached is the desired end state, not a failure.
+            Err(error) => {
+                tracing::debug!(%error, "no cached ADK session to forget");
+                Ok(())
+            }
+        }
     }
 }

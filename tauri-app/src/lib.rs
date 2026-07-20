@@ -13,7 +13,9 @@ use std::{
 };
 
 use essentio_core::{
-    engine::{AgentEngine, EngineEvent, EngineKind, RunOptions, UserInput, build_engine},
+    engine::{
+        AgentEngine, EngineEvent, EngineKind, RunOptions, SessionId, UserInput, build_engine,
+    },
     memory::{Message, Session, Store},
     providers::{
         ProviderConfig, ProviderKind,
@@ -421,6 +423,44 @@ fn rename_session(
         .map_err(|e| e.to_string())
 }
 
+/// Drop messages at or after `from_seq` and invalidate engine-side caches.
+///
+/// Backs both regenerate (truncate the last assistant turn) and
+/// edit-and-resend (truncate from the edited turn). Engines are told to forget
+/// the session afterwards; skipping that would let ADK replay the removed
+/// turns on the next run.
+#[tauri::command]
+async fn truncate_session(
+    state: State<'_, AppState>,
+    session_id: String,
+    from_seq: i64,
+) -> Result<usize, String> {
+    let removed = state
+        .store
+        .truncate_from(&session_id, from_seq)
+        .map_err(|e| e.to_string())?;
+
+    // Every cached engine may hold state for this session, so clear them all
+    // rather than guessing which one produced the transcript.
+    let engines: Vec<Arc<dyn AgentEngine>> = {
+        let cache = state
+            .engines
+            .lock()
+            .map_err(|_| "engine cache poisoned".to_string())?;
+        cache.values().cloned().collect()
+    };
+
+    let key = SessionId::from(session_id);
+    for engine in engines {
+        engine
+            .forget_session(&key)
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+
+    Ok(removed)
+}
+
 #[tauri::command]
 fn get_messages(state: State<'_, AppState>, session_id: String) -> Result<Vec<Message>, String> {
     state
@@ -461,7 +501,8 @@ pub fn run() {
             create_session,
             delete_session,
             rename_session,
-            get_messages
+            get_messages,
+            truncate_session
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

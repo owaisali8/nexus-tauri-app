@@ -80,9 +80,24 @@ export function ProviderSettings({
     }
   }, []);
 
+  // Initial load. Guarded so a dialog closed mid-request does not set state
+  // on an unmounted component.
   useEffect(() => {
-    void refresh();
-  }, [refresh]);
+    let cancelled = false;
+
+    void (async () => {
+      try {
+        const loaded = await listProviders();
+        if (!cancelled) setProviders(loaded);
+      } catch (caught: unknown) {
+        if (!cancelled) setError(String(caught));
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // Escape closes the dialog, matching the rest of the app's keyboard-first feel.
   useEffect(() => {

@@ -230,6 +230,18 @@ pub trait AgentEngine: Send + Sync {
         input: UserInput,
         opts: RunOptions,
     ) -> Result<BoxStream<'static, EngineEvent>>;
+
+    /// Discard any cached state for a session.
+    ///
+    /// Called after the stored transcript is edited or truncated. An engine
+    /// that keeps its own copy of the conversation must drop it here, or the
+    /// next turn would replay history the user just removed.
+    ///
+    /// The default is a no-op, which is correct for engines that read the
+    /// transcript from the store on every run.
+    async fn forget_session(&self, _session_id: &SessionId) -> Result<()> {
+        Ok(())
+    }
 }
 
 #[cfg(test)]

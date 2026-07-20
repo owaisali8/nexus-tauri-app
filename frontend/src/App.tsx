@@ -14,17 +14,12 @@ import {
   listSessions,
   renameSession,
   runStream,
+  truncateSession,
 } from "./lib/ipc";
+import { MessageList, type Turn } from "./features/chat/MessageList";
 import { ProviderSettings } from "./features/settings/ProviderSettings";
 import { WindowControls } from "./WindowControls";
 import "./App.css";
-
-type Turn = {
-  id: string;
-  role: "system" | "user" | "assistant";
-  content: string;
-  pending?: boolean;
-};
 
 type ConnectionState =
   | { status: "idle" }
@@ -68,7 +63,6 @@ export default function App() {
   const [usage, setUsage] = useState<Usage | null>(null);
 
   const cancelRef = useRef<(() => void) | null>(null);
-  const scrollRef = useRef<HTMLDivElement | null>(null);
 
   const activeProvider = useMemo(
     () => providers.find((provider) => provider.id === providerId) ?? null,
@@ -127,14 +121,30 @@ export default function App() {
     }
   }, [providerId, testConnection]);
 
-  useEffect(() => {
-    scrollRef.current?.scrollTo({
-      top: scrollRef.current.scrollHeight,
-      behavior: "smooth",
-    });
-  }, [turns]);
-
   useEffect(() => () => cancelRef.current?.(), []);
+
+  /**
+   * Replace local turns with the stored transcript.
+   *
+   * The store is authoritative: it carries the real ids and `seq` values that
+   * regenerate and edit need to truncate from, which optimistic local turns
+   * do not have.
+   */
+  const loadTurns = useCallback(async (sessionId: string) => {
+    try {
+      const messages = await getMessages(sessionId);
+      setTurns(
+        messages.map((message) => ({
+          id: message.id,
+          role: message.role,
+          content: message.content,
+          seq: message.seq,
+        })),
+      );
+    } catch (error: unknown) {
+      console.error("failed to load messages", error);
+    }
+  }, []);
 
   const openSession = useCallback(
     async (session: Session) => {
@@ -146,22 +156,10 @@ export default function App() {
       // A session is pinned to the engine that produced it, so replies stay
       // consistent with the transcript above them.
       setEngine(session.engine);
-
-      try {
-        const messages = await getMessages(session.id);
-        setTurns(
-          messages.map((message) => ({
-            id: message.id,
-            role: message.role,
-            content: message.content,
-          })),
-        );
-      } catch (error: unknown) {
-        setTurns([]);
-        console.error("failed to load messages", error);
-      }
+      setTurns([]);
+      await loadTurns(session.id);
     },
-    [],
+    [loadTurns],
   );
 
   const startNewChat = useCallback(() => {
@@ -195,6 +193,77 @@ export default function App() {
     void refreshSessions();
   }, [refreshSessions]);
 
+  /**
+   * Stream one turn into an existing session.
+   *
+   * Shared by send, regenerate and edit-and-resend — all three are "append a
+   * user turn and stream the reply", differing only in what was truncated
+   * first.
+   */
+  const startRun = useCallback(
+    (sessionId: string, prompt: string) => {
+      const assistantId = newId();
+      setTurns((current) => [
+        ...current,
+        { id: newId(), role: "user", content: prompt },
+        { id: assistantId, role: "assistant", content: "", pending: true },
+      ]);
+      setIsStreaming(true);
+      setUsage(null);
+
+      const settle = (patch: Partial<Turn> = {}) => {
+        cancelRef.current = null;
+        setIsStreaming(false);
+        setTurns((current) =>
+          current.map((turn) =>
+            turn.id === assistantId
+              ? { ...turn, pending: false, ...patch }
+              : turn,
+          ),
+        );
+        void refreshSessions();
+      };
+
+      cancelRef.current = runStream(
+        {
+          sessionId,
+          providerId,
+          model,
+          prompt,
+          temperature: 0.7,
+          engine,
+        },
+        (event: EngineEvent) => {
+          switch (event.type) {
+            case "token":
+              setTurns((current) =>
+                current.map((turn) =>
+                  turn.id === assistantId
+                    ? { ...turn, content: turn.content + event.text }
+                    : turn,
+                ),
+              );
+              break;
+            case "done":
+              setUsage(event.usage ?? null);
+              settle();
+              // Reconcile with the store so the new turns pick up their real
+              // ids and seq values, which regenerate and edit depend on.
+              void loadTurns(sessionId);
+              break;
+            case "error":
+              settle({ content: `⚠ ${event.message}` });
+              break;
+            default:
+              // tool_call / tool_result / citation land in Phase 2.
+              break;
+          }
+        },
+      );
+    },
+    [providerId, model, engine, refreshSessions, loadTurns],
+  );
+
   const send = useCallback(async () => {
     const text = input.trim();
     if (!text || isStreaming || !providerId || !model) return;
@@ -222,53 +291,8 @@ export default function App() {
       }
     }
 
-    const assistantId = newId();
-    setTurns((current) => [
-      ...current,
-      { id: newId(), role: "user", content: text },
-      { id: assistantId, role: "assistant", content: "", pending: true },
-    ]);
     setInput("");
-    setIsStreaming(true);
-    setUsage(null);
-
-    const settle = (patch: Partial<Turn> = {}) => {
-      cancelRef.current = null;
-      setIsStreaming(false);
-      setTurns((current) =>
-        current.map((turn) =>
-          turn.id === assistantId ? { ...turn, pending: false, ...patch } : turn,
-        ),
-      );
-      void refreshSessions();
-    };
-
-    cancelRef.current = runStream(
-      { sessionId, providerId, model, prompt: text, temperature: 0.7, engine },
-      (event: EngineEvent) => {
-        switch (event.type) {
-          case "token":
-            setTurns((current) =>
-              current.map((turn) =>
-                turn.id === assistantId
-                  ? { ...turn, content: turn.content + event.text }
-                  : turn,
-              ),
-            );
-            break;
-          case "done":
-            setUsage(event.usage ?? null);
-            settle();
-            break;
-          case "error":
-            settle({ content: `⚠ ${event.message}` });
-            break;
-          default:
-            // tool_call / tool_result / citation land in Phase 2.
-            break;
-        }
-      },
-    );
+    startRun(sessionId, text);
   }, [
     input,
     isStreaming,
@@ -277,7 +301,62 @@ export default function App() {
     engine,
     activeSessionId,
     refreshSessions,
+    startRun,
   ]);
+
+  /**
+   * Drop the last assistant turn and ask again with the same prompt.
+   */
+  const regenerate = useCallback(async () => {
+    if (isStreaming || !activeSessionId) return;
+
+    const lastAssistant = [...turns]
+      .reverse()
+      .find((turn) => turn.role === "assistant" && turn.seq !== undefined);
+    if (!lastAssistant?.seq) return;
+
+    // The user turn immediately before it is the prompt to replay.
+    const prompt = [...turns]
+      .reverse()
+      .find(
+        (turn) =>
+          turn.role === "user" &&
+          turn.seq !== undefined &&
+          turn.seq < lastAssistant.seq!,
+      );
+    if (!prompt) return;
+
+    try {
+      // Truncate from the user turn, since startRun re-appends it.
+      await truncateSession(activeSessionId, prompt.seq!);
+      setTurns((current) =>
+        current.filter((turn) => (turn.seq ?? Infinity) < prompt.seq!),
+      );
+      startRun(activeSessionId, prompt.content);
+    } catch (error: unknown) {
+      console.error("regenerate failed", error);
+    }
+  }, [isStreaming, activeSessionId, turns, startRun]);
+
+  /**
+   * Rewrite a user turn and re-run from there, discarding everything after.
+   */
+  const editAndResend = useCallback(
+    async (turn: Turn, next: string) => {
+      if (isStreaming || !activeSessionId || turn.seq === undefined) return;
+
+      try {
+        await truncateSession(activeSessionId, turn.seq);
+        setTurns((current) =>
+          current.filter((item) => (item.seq ?? Infinity) < turn.seq!),
+        );
+        startRun(activeSessionId, next);
+      } catch (error: unknown) {
+        console.error("edit failed", error);
+      }
+    },
+    [isStreaming, activeSessionId, startRun],
+  );
 
   const canSend = Boolean(input.trim() && !isStreaming && providerId && model);
 
@@ -430,40 +509,35 @@ export default function App() {
             </div>
           </div>
 
-          <main className="messages" ref={scrollRef}>
-            {connection.status === "failed" && (
-              <div className="notice notice--error">
-                <strong>
-                  Can’t reach {activeProvider?.label ?? "provider"}
-                </strong>
-                <p>{connection.message}</p>
-              </div>
-            )}
-
-            {turns.length === 0 && connection.status === "ok" && (
-              <div className="empty">
-                <h1 className="empty__title">Local and ready</h1>
-                <p className="empty__body">
-                  Streaming through {activeProvider?.label}. Nothing leaves this
-                  machine.
-                </p>
-              </div>
-            )}
-
-            {turns.map((turn) => (
-              <article key={turn.id} className={`turn turn--${turn.role}`}>
-                <div className="turn__role">
-                  {turn.role === "user" ? "You" : "Assistant"}
+          {turns.length === 0 ? (
+            <main className="messages">
+              {connection.status === "failed" && (
+                <div className="notice notice--error">
+                  <strong>
+                    Can’t reach {activeProvider?.label ?? "provider"}
+                  </strong>
+                  <p>{connection.message}</p>
                 </div>
-                <div className="turn__body">
-                  {turn.content}
-                  {turn.pending && !turn.content && (
-                    <span className="caret" aria-label="waiting" />
-                  )}
+              )}
+
+              {connection.status === "ok" && (
+                <div className="empty">
+                  <h1 className="empty__title">Local and ready</h1>
+                  <p className="empty__body">
+                    Streaming through {activeProvider?.label}. Nothing leaves
+                    this machine.
+                  </p>
                 </div>
-              </article>
-            ))}
-          </main>
+              )}
+            </main>
+          ) : (
+            <MessageList
+              turns={turns}
+              isBusy={isStreaming}
+              onRegenerate={() => void regenerate()}
+              onEdit={(turn, next) => void editAndResend(turn, next)}
+            />
+          )}
 
           <footer className="composer">
             <textarea
