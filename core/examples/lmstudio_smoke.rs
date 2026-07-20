@@ -8,7 +8,9 @@
 
 use essentio_core::{
     engine::EngineEvent,
-    providers::{ChatMessage, ChatTransport, ProviderConfig, openai_compat::OpenAiCompatClient},
+    providers::{
+        ChatMessage, ChatRequest, ChatTransport, ProviderConfig, openai_compat::OpenAiCompatClient,
+    },
 };
 use futures::StreamExt;
 use std::io::Write;
@@ -33,12 +35,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut stream = client
         .chat_stream(
-            &chat_model.id,
-            vec![
-                ChatMessage::system("You are terse. Answer in one short sentence."),
-                ChatMessage::user("What is a Tauri sidecar?"),
-            ],
-            Some(0.2),
+            ChatRequest::new(
+                &chat_model.id,
+                vec![
+                    ChatMessage::system("You are terse. Answer in one short sentence."),
+                    ChatMessage::user("What is a Tauri sidecar?"),
+                ],
+            )
+            .with_temperature(Some(0.2)),
         )
         .await?;
 

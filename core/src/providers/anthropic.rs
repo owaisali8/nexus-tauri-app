@@ -12,7 +12,8 @@ use crate::{
     Error, Result,
     engine::{EngineEvent, Usage},
     providers::{
-        ChatTransport, ModelInfo, ProviderConfig, openai_compat::ChatMessage, split_system,
+        ChatRequest, ChatTransport, ModelInfo, ProviderConfig, openai_compat::ChatMessage,
+        split_system,
     },
 };
 
@@ -137,9 +138,10 @@ pub(crate) fn normalize(messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
                 previous.content.push_str("\n\n");
                 previous.content.push_str(&message.content);
             }
-            _ => out.push(ChatMessage {
-                role: role.to_string(),
-                content: message.content,
+            _ => out.push(if role == "assistant" {
+                ChatMessage::assistant(message.content)
+            } else {
+                ChatMessage::user(message.content)
             }),
         }
     }
@@ -224,13 +226,21 @@ impl ChatTransport for AnthropicClient {
             .collect())
     }
 
-    async fn chat_stream(
-        &self,
-        model: &str,
-        messages: Vec<ChatMessage>,
-        temperature: Option<f32>,
-    ) -> Result<BoxStream<'static, EngineEvent>> {
-        let (system, rest) = split_system(messages);
+    async fn chat_stream(&self, request: ChatRequest) -> Result<BoxStream<'static, EngineEvent>> {
+        if !request.tools.is_empty() {
+            // Anthropic encodes tools as content blocks rather than the
+            // OpenAI `tools` array, so this needs its own mapping. Warn
+            // rather than drop silently — a caller expecting calls would
+            // otherwise get a plausible answer and no explanation.
+            tracing::warn!(
+                tool_count = request.tools.len(),
+                "the Anthropic transport does not forward tools yet; they will be ignored"
+            );
+        }
+
+        let model = request.model.clone();
+        let temperature = request.temperature;
+        let (system, rest) = split_system(request.messages);
         let normalized = normalize(rest);
 
         if normalized.is_empty() {
@@ -242,7 +252,7 @@ impl ChatTransport for AnthropicClient {
         let response = self
             .request(reqwest::Method::POST, "v1/messages")
             .json(&MessagesRequest {
-                model,
+                model: &model,
                 max_tokens: DEFAULT_MAX_TOKENS,
                 messages: &normalized,
                 stream: true,

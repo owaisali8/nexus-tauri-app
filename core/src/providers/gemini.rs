@@ -13,7 +13,8 @@ use crate::{
     Error, Result,
     engine::{EngineEvent, Usage},
     providers::{
-        ChatTransport, ModelInfo, ProviderConfig, openai_compat::ChatMessage, split_system,
+        ChatRequest, ChatTransport, ModelInfo, ProviderConfig, openai_compat::ChatMessage,
+        split_system,
     },
 };
 
@@ -253,13 +254,20 @@ impl ChatTransport for GeminiClient {
             .collect())
     }
 
-    async fn chat_stream(
-        &self,
-        model: &str,
-        messages: Vec<ChatMessage>,
-        temperature: Option<f32>,
-    ) -> Result<BoxStream<'static, EngineEvent>> {
-        let (system, rest) = split_system(messages);
+    async fn chat_stream(&self, request: ChatRequest) -> Result<BoxStream<'static, EngineEvent>> {
+        if !request.tools.is_empty() {
+            // Gemini declares tools as functionDeclarations, a different
+            // shape from the OpenAI `tools` array. Warn rather than drop
+            // silently — see the Anthropic transport for the same reasoning.
+            tracing::warn!(
+                tool_count = request.tools.len(),
+                "the Gemini transport does not forward tools yet; they will be ignored"
+            );
+        }
+
+        let model = request.model.clone();
+        let temperature = request.temperature;
+        let (system, rest) = split_system(request.messages);
         let contents = to_contents(rest);
 
         if contents.is_empty() {
@@ -270,7 +278,7 @@ impl ChatTransport for GeminiClient {
 
         let path = format!(
             "v1beta/models/{}:streamGenerateContent?alt=sse",
-            short_model_name(model)
+            short_model_name(&model)
         );
 
         let response = self

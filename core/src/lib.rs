@@ -9,5 +9,6 @@ pub mod engine;
 pub mod error;
 pub mod memory;
 pub mod providers;
+pub mod tools;
 
 pub use error::{Error, Result};

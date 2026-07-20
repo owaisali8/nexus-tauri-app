@@ -51,10 +51,14 @@ pub struct Message {
 
 impl Message {
     /// Convert to the wire format the OpenAI-compatible client expects.
+    ///
+    /// Stored transcripts hold text only; tool calls and their results are
+    /// exchanged within a single run and are not persisted as messages.
     pub fn to_chat_message(&self) -> ChatMessage {
-        ChatMessage {
-            role: self.role.clone(),
-            content: self.content.clone(),
+        match self.role.as_str() {
+            "assistant" => ChatMessage::assistant(&self.content),
+            "system" => ChatMessage::system(&self.content),
+            _ => ChatMessage::user(&self.content),
         }
     }
 }

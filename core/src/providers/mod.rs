@@ -13,11 +13,11 @@ use std::sync::Arc;
 use futures::stream::BoxStream;
 use serde::{Deserialize, Serialize};
 
-use crate::{Error, Result, engine::EngineEvent};
+use crate::{Error, Result, engine::EngineEvent, tools::ToolSpec};
 
-/// Re-exported so callers depend on `providers::ChatMessage` rather than on
-/// the OpenAI module, which is one transport among several.
-pub use openai_compat::ChatMessage;
+/// Re-exported so callers depend on `providers::…` rather than on the OpenAI
+/// module, which is one transport among several.
+pub use openai_compat::{ChatMessage, WireFunction, WireToolCall};
 
 /// Default LM Studio OpenAI-compatible endpoint.
 pub const LM_STUDIO_DEFAULT_BASE_URL: &str = "http://localhost:1234/v1";
@@ -31,6 +31,40 @@ pub struct ModelInfo {
     pub id: String,
     #[serde(default)]
     pub owned_by: Option<String>,
+}
+
+/// One request to a provider.
+///
+/// A struct rather than positional arguments because this grows: tools landed
+/// after temperature, and max_tokens and stop sequences are still to come.
+#[derive(Debug, Clone)]
+pub struct ChatRequest {
+    pub model: String,
+    pub messages: Vec<ChatMessage>,
+    pub temperature: Option<f32>,
+    /// Tools offered to the model. Empty means none are available.
+    pub tools: Vec<ToolSpec>,
+}
+
+impl ChatRequest {
+    pub fn new(model: impl Into<String>, messages: Vec<ChatMessage>) -> Self {
+        Self {
+            model: model.into(),
+            messages,
+            temperature: None,
+            tools: Vec::new(),
+        }
+    }
+
+    pub fn with_temperature(mut self, temperature: Option<f32>) -> Self {
+        self.temperature = temperature;
+        self
+    }
+
+    pub fn with_tools(mut self, tools: Vec<ToolSpec>) -> Self {
+        self.tools = tools;
+        self
+    }
 }
 
 /// A provider's chat wire format.
@@ -50,12 +84,15 @@ pub trait ChatTransport: Send + Sync {
     ///
     /// The returned stream must terminate with exactly one
     /// [`EngineEvent::Done`] or [`EngineEvent::Error`].
-    async fn chat_stream(
-        &self,
-        model: &str,
-        messages: Vec<ChatMessage>,
-        temperature: Option<f32>,
-    ) -> Result<BoxStream<'static, EngineEvent>>;
+    async fn chat_stream(&self, request: ChatRequest) -> Result<BoxStream<'static, EngineEvent>>;
+
+    /// Whether this transport forwards tool calls.
+    ///
+    /// A transport that ignores tools must say so, otherwise a run would get
+    /// a plausible text answer and no calls, with nothing to indicate why.
+    fn supports_tools(&self) -> bool {
+        false
+    }
 }
 
 /// Build the transport for a provider.

@@ -36,7 +36,7 @@ use std::sync::Arc;
 
 use crate::{
     engine::EngineEvent,
-    providers::{ChatMessage, ChatTransport, ProviderConfig, build_transport},
+    providers::{ChatMessage, ChatRequest, ChatTransport, ProviderConfig, build_transport},
 };
 
 pub struct CompatModel {
@@ -78,15 +78,10 @@ fn to_chat_messages(contents: &[Content]) -> Vec<ChatMessage> {
                 return None;
             }
 
-            let role = match content.role.as_str() {
-                "model" | "assistant" => "assistant",
-                "system" => "system",
-                _ => "user",
-            };
-
-            Some(ChatMessage {
-                role: role.to_string(),
-                content: text,
+            Some(match content.role.as_str() {
+                "model" | "assistant" => ChatMessage::assistant(text),
+                "system" => ChatMessage::system(text),
+                _ => ChatMessage::user(text),
             })
         })
         .collect()
@@ -157,7 +152,7 @@ impl Llm for CompatModel {
 
         let stream = self
             .transport
-            .chat_stream(&model, messages, temperature)
+            .chat_stream(ChatRequest::new(model, messages).with_temperature(temperature))
             .await
             .map_err(|error| AdkError::model(error.to_string()))?;
 

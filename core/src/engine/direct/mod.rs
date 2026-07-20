@@ -1,19 +1,29 @@
-//! Framework-free [`AgentEngine`] over the OpenAI-compatible client.
+//! Framework-free [`AgentEngine`] over the provider transports.
 //!
-//! No agent framework and no tool loop — just streamed completions. It exists
-//! so plain chat has a path with minimal moving parts, and so the ADK engine
-//! has something to be compared against.
-
-use futures::{StreamExt, stream::BoxStream};
+//! No agent framework: a completion stream plus a tool loop. It exists so
+//! plain chat has a path with minimal moving parts, and so the ADK engine has
+//! something to be compared against.
 
 use std::sync::Arc;
+
+use futures::{StreamExt, stream::BoxStream};
 
 use crate::{
     Result,
     engine::{AgentEngine, EngineEvent, RunOptions, SessionId, UserInput},
     memory::Store,
-    providers::{ChatMessage, ChatTransport, ProviderConfig, build_transport},
+    providers::{
+        ChatMessage, ChatRequest, ChatTransport, ProviderConfig, WireFunction, WireToolCall,
+        build_transport,
+    },
+    tools::{ApprovalGate, DenyAll, ToolCall, ToolRegistry},
 };
+
+/// Ceiling on tool round-trips within a single turn.
+///
+/// A model that keeps calling tools without producing an answer would
+/// otherwise loop until the user cancels, spending tokens each round.
+const MAX_TOOL_ROUNDS: usize = 8;
 
 pub struct DirectEngine {
     provider: ProviderConfig,
@@ -21,6 +31,10 @@ pub struct DirectEngine {
     /// Transcripts live in SQLite, so conversations survive restart and the
     /// engine holds no conversation state of its own.
     store: Store,
+    tools: ToolRegistry,
+    /// Defaults to denying everything: an engine built without an explicit
+    /// gate must not run side-effecting tools unattended.
+    gate: Arc<dyn ApprovalGate>,
 }
 
 impl DirectEngine {
@@ -29,7 +43,15 @@ impl DirectEngine {
             provider,
             api_key,
             store,
+            tools: ToolRegistry::new(),
+            gate: Arc::new(DenyAll),
         }
+    }
+
+    pub fn with_tools(mut self, tools: ToolRegistry, gate: Arc<dyn ApprovalGate>) -> Self {
+        self.tools = tools;
+        self.gate = gate;
+        self
     }
 
     fn transport(&self) -> Result<Arc<dyn ChatTransport>> {
@@ -60,35 +82,137 @@ impl AgentEngine for DirectEngine {
             self.store
                 .load_messages(&session_id.0)?
                 .iter()
-                .map(super::super::memory::Message::to_chat_message),
+                .map(crate::memory::Message::to_chat_message),
         );
 
-        let inner = transport
-            .chat_stream(&opts.model, messages, opts.temperature)
-            .await?;
+        // Only the tools this run enabled, and only if the transport can
+        // actually carry them.
+        let tools = if transport.supports_tools() {
+            if opts.tool_ids.is_empty() {
+                ToolRegistry::new()
+            } else {
+                self.tools.subset(&opts.tool_ids)
+            }
+        } else {
+            if !opts.tool_ids.is_empty() {
+                tracing::warn!(
+                    provider = %self.provider.id,
+                    "this provider's transport cannot forward tools; the run will proceed without them"
+                );
+            }
+            ToolRegistry::new()
+        };
 
-        // Accumulate the reply so it can be written once the run terminates.
+        let gate = Arc::clone(&self.gate);
         let store = self.store.clone();
         let key = session_id.0.clone();
-        let mut reply = String::new();
+        let model = opts.model.clone();
+        let temperature = opts.temperature;
 
-        let stream = inner.map(move |event| {
-            match &event {
-                EngineEvent::Token { text } => reply.push_str(text),
-                EngineEvent::Done { .. } if !reply.is_empty() => {
-                    let text = std::mem::take(&mut reply);
-                    // A persistence failure must not truncate the stream the
-                    // user is watching; log and carry on.
-                    if let Err(error) = store.append_message(&key, "assistant", &text) {
-                        tracing::error!(%error, "failed to persist assistant message");
+        let stream = async_stream::stream! {
+            let mut messages = messages;
+            let mut answer = String::new();
+
+            for round in 0..MAX_TOOL_ROUNDS {
+                let request = ChatRequest::new(&model, messages.clone())
+                    .with_temperature(temperature)
+                    .with_tools(tools.specs());
+
+                let mut inner = match transport.chat_stream(request).await {
+                    Ok(stream) => stream,
+                    Err(error) => {
+                        yield EngineEvent::Error { message: error.to_string() };
+                        return;
+                    }
+                };
+
+                let mut calls: Vec<ToolCall> = Vec::new();
+                let mut usage = None;
+                let mut failed = false;
+
+                while let Some(event) = inner.next().await {
+                    match event {
+                        EngineEvent::Token { text } => {
+                            answer.push_str(&text);
+                            yield EngineEvent::Token { text };
+                        }
+                        EngineEvent::ToolCall { id, name, args } => {
+                            calls.push(ToolCall {
+                                id: id.clone(),
+                                name: name.clone(),
+                                arguments: args.clone(),
+                            });
+                            yield EngineEvent::ToolCall { id, name, args };
+                        }
+                        EngineEvent::Done { usage: reported } => {
+                            usage = reported;
+                            break;
+                        }
+                        EngineEvent::Error { message } => {
+                            failed = true;
+                            yield EngineEvent::Error { message };
+                            break;
+                        }
+                        other => yield other,
                     }
                 }
-                // On Error the partial reply is deliberately dropped: half a
-                // sentence in history poisons every later turn.
-                _ => {}
+
+                if failed {
+                    return;
+                }
+
+                // No tools requested: this round produced the answer.
+                if calls.is_empty() {
+                    if !answer.is_empty()
+                        && let Err(error) = store.append_message(&key, "assistant", &answer)
+                    {
+                        tracing::error!(%error, "failed to persist assistant message");
+                    }
+                    yield EngineEvent::Done { usage };
+                    return;
+                }
+
+                // Record what the model asked for. Omitting this makes the
+                // tool results below reference calls the API has no record of.
+                messages.push(ChatMessage::tool_requests(
+                    calls
+                        .iter()
+                        .map(|call| WireToolCall {
+                            id: call.id.clone(),
+                            kind: "function".to_string(),
+                            function: WireFunction {
+                                name: call.name.clone(),
+                                arguments: call.arguments.to_string(),
+                            },
+                        })
+                        .collect(),
+                ));
+
+                for call in &calls {
+                    let outcome = tools.invoke(call, gate.as_ref()).await;
+
+                    yield EngineEvent::ToolResult {
+                        id: outcome.id.clone(),
+                        ok: outcome.ok,
+                        output: outcome.output.clone(),
+                    };
+
+                    messages.push(ChatMessage::tool_result(
+                        &outcome.id,
+                        outcome.output.to_string(),
+                    ));
+                }
+
+                if round + 1 == MAX_TOOL_ROUNDS {
+                    yield EngineEvent::Error {
+                        message: format!(
+                            "stopped after {MAX_TOOL_ROUNDS} rounds of tool calls without a final answer"
+                        ),
+                    };
+                    return;
+                }
             }
-            event
-        });
+        };
 
         Ok(stream.boxed())
     }
@@ -111,18 +235,42 @@ mod tests {
         provider.base_url = Some("http://127.0.0.1:1/v1".to_string());
         let engine = DirectEngine::new(provider, None, store.clone());
 
-        let result = engine
+        let mut stream = engine
             .run_stream(
                 session.id.clone().into(),
                 UserInput::text("hello"),
                 RunOptions::new("lmstudio-local", "any-model"),
             )
-            .await;
+            .await
+            .expect("the stream itself opens; the failure arrives as an event");
 
-        assert!(result.is_err(), "expected a transport error");
+        let events: Vec<EngineEvent> = stream.by_ref().collect().await;
+        assert!(
+            matches!(events.first(), Some(EngineEvent::Error { .. })),
+            "expected a transport error event, got {events:?}"
+        );
 
         let messages = store.load_messages(&session.id).unwrap();
         assert_eq!(messages.len(), 1, "the user turn should still be recorded");
         assert_eq!(messages[0].role, "user");
+    }
+
+    /// The default must stay deny, not drift to permissive: an engine built
+    /// without a gate would otherwise run side-effecting tools unattended.
+    #[tokio::test]
+    async fn an_engine_without_an_explicit_gate_denies_by_default() {
+        let store = Store::open_in_memory().unwrap();
+        let engine = DirectEngine::new(ProviderConfig::lm_studio(), None, store);
+
+        let decision = engine
+            .gate
+            .request(&ToolCall {
+                id: "call-1".to_string(),
+                name: "anything".to_string(),
+                arguments: serde_json::json!({}),
+            })
+            .await;
+
+        assert_eq!(decision, crate::tools::Approval::Deny);
     }
 }
