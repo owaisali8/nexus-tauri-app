@@ -17,6 +17,15 @@ use crate::{Error, Result, engine::EngineKind, providers::openai_compat::ChatMes
 /// Ordered migrations. Append only; never edit one that has shipped.
 const MIGRATIONS: &[(i64, &str)] = &[(1, include_str!("../../db/migrations/0001_sessions.sql"))];
 
+/// Tables every migrated database must have.
+///
+/// Checked after migrations run, because the version ledger alone is not
+/// trustworthy: a database from a different schema lineage can record the
+/// same version numbers, causing migrations to be skipped and leaving the
+/// tables absent. Failing here with a clear message beats failing later with
+/// "no such table" from whatever query happens to run first.
+const EXPECTED_TABLES: &[&str] = &["sessions", "messages", "settings"];
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Session {
@@ -102,7 +111,41 @@ impl Store {
             connection: Arc::new(Mutex::new(connection)),
         };
         store.migrate()?;
+        store.verify_schema()?;
         Ok(store)
+    }
+
+    /// Confirm the migrations actually produced the schema they claim to.
+    fn verify_schema(&self) -> Result<()> {
+        self.with_connection(|connection| {
+            let mut statement = connection
+                .prepare("SELECT name FROM sqlite_master WHERE type = 'table'")
+                .map_err(db_error)?;
+
+            let present: Vec<String> = statement
+                .query_map([], |row| row.get(0))
+                .map_err(db_error)?
+                .collect::<rusqlite::Result<_>>()
+                .map_err(db_error)?;
+
+            let missing: Vec<&str> = EXPECTED_TABLES
+                .iter()
+                .filter(|expected| !present.iter().any(|name| name == *expected))
+                .copied()
+                .collect();
+
+            if missing.is_empty() {
+                return Ok(());
+            }
+
+            Err(Error::Transport(format!(
+                "database is missing tables [{}] even though migrations report as applied. \
+                 This usually means the file belongs to an incompatible schema \
+                 (tables present: [{}]). Move or delete it and restart to get a fresh database.",
+                missing.join(", "),
+                present.join(", ")
+            )))
+        })
     }
 
     fn with_connection<T>(&self, action: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {

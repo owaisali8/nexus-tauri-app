@@ -429,7 +429,14 @@ fn get_messages(state: State<'_, AppState>, session_id: String) -> Result<Vec<Me
         .map_err(|e| e.to_string())
 }
 
-const DB_FILE: &str = "essentio.sqlite3";
+/// Deliberately not `essentio.sqlite3`.
+///
+/// The pre-workspace build shipped that filename with its own
+/// `schema_migrations` ledger recording versions 1 and 2. Reusing the name
+/// meant this schema's migration 1 was treated as already applied and skipped,
+/// so `sessions` was never created and every query failed with "no such
+/// table". The schemas share no lineage, so they get separate files.
+const DB_FILE: &str = "workspace.sqlite3";
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {

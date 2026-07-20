@@ -88,6 +88,47 @@ fn migrations_are_safe_to_run_against_an_existing_database() {
     }
 }
 
+/// Regression: a database from a different schema lineage can already record
+/// version 1 in `schema_migrations`. The migration was then skipped, `sessions`
+/// was never created, and the app failed at runtime with "no such table:
+/// sessions". Opening such a file must fail immediately with a message that
+/// names the problem.
+#[test]
+fn foreign_migration_ledger_is_rejected_not_silently_skipped() {
+    let db = TempDb::new("foreign-ledger");
+
+    // Stand in for the old build: same ledger table, same version numbers,
+    // entirely different tables.
+    {
+        let connection = rusqlite::Connection::open(&db.0).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE schema_migrations (
+                   version INTEGER PRIMARY KEY,
+                   applied_at INTEGER NOT NULL DEFAULT (unixepoch())
+                 );
+                 INSERT INTO schema_migrations (version) VALUES (1), (2);
+                 CREATE TABLE agent_sessions (id TEXT PRIMARY KEY);
+                 CREATE TABLE agents (id TEXT PRIMARY KEY);",
+            )
+            .unwrap();
+    }
+
+    let message = match Store::open(&db.0) {
+        Ok(_) => panic!("opening a foreign-lineage database must fail loudly"),
+        Err(error) => error.to_string(),
+    };
+
+    assert!(
+        message.contains("sessions"),
+        "error should name the missing table, got: {message}"
+    );
+    assert!(
+        message.contains("agent_sessions"),
+        "error should show what the file actually contains, got: {message}"
+    );
+}
+
 #[test]
 fn settings_persist_across_reopen() {
     let db = TempDb::new("settings");
