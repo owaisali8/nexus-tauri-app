@@ -217,6 +217,19 @@ fn save_provider(
         api_key,
     } = request;
 
+    let existing = load_providers(&app)?
+        .into_iter()
+        .find(|provider| provider.id == config.id);
+
+    // Carry the stored key reference forward when the caller omits it.
+    // Without this, editing a provider without retyping its key would drop
+    // the ref and orphan the keychain entry.
+    if config.api_key_ref.is_none()
+        && let Some(previous) = existing.as_ref().and_then(|p| p.api_key_ref.clone())
+    {
+        config.api_key_ref = Some(previous);
+    }
+
     // A non-empty key is written to the keychain and the ref recorded. An
     // absent key leaves any existing secret untouched, so the frontend can
     // save edits without round-tripping the secret.

@@ -15,6 +15,7 @@ import {
   renameSession,
   runStream,
 } from "./lib/ipc";
+import { ProviderSettings } from "./features/settings/ProviderSettings";
 import { WindowControls } from "./WindowControls";
 import "./App.css";
 
@@ -58,6 +59,7 @@ export default function App() {
     status: "idle",
   });
 
+  const [showSettings, setShowSettings] = useState(false);
   const [sessions, setSessions] = useState<Session[]>([]);
   const [activeSessionId, setActiveSessionId] = useState("");
   const [turns, setTurns] = useState<Turn[]>([]);
@@ -73,17 +75,20 @@ export default function App() {
     [providers, providerId],
   );
 
-  useEffect(() => {
-    listProviders()
-      .then((loaded) => {
-        setProviders(loaded);
-        if (loaded[0]) setProviderId(loaded[0].id);
-      })
-      .catch((error: unknown) => {
-        setConnection({ status: "failed", message: String(error) });
-      });
-
-    void refreshSessions();
+  const refreshProviders = useCallback(async () => {
+    try {
+      const loaded = await listProviders();
+      setProviders(loaded);
+      // Keep the current selection if it still exists; otherwise fall back to
+      // the first provider, or clear it when the last one was removed.
+      setProviderId((current) =>
+        loaded.some((provider) => provider.id === current)
+          ? current
+          : (loaded[0]?.id ?? ""),
+      );
+    } catch (error: unknown) {
+      setConnection({ status: "failed", message: String(error) });
+    }
   }, []);
 
   const refreshSessions = useCallback(async () => {
@@ -93,6 +98,11 @@ export default function App() {
       console.error("failed to load sessions", error);
     }
   }, []);
+
+  useEffect(() => {
+    void refreshProviders();
+    void refreshSessions();
+  }, [refreshProviders, refreshSessions]);
 
   const testConnection = useCallback(async (id: string) => {
     setConnection({ status: "testing" });
@@ -107,7 +117,14 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (providerId) void testConnection(providerId);
+    if (providerId) {
+      void testConnection(providerId);
+    } else {
+      setConnection({
+        status: "failed",
+        message: "No provider configured. Add one from Providers.",
+      });
+    }
   }, [providerId, testConnection]);
 
   useEffect(() => {
@@ -398,9 +415,17 @@ export default function App() {
               <button
                 type="button"
                 className="button button--ghost"
+                disabled={!providerId}
                 onClick={() => providerId && void testConnection(providerId)}
               >
                 Test
+              </button>
+              <button
+                type="button"
+                className="button button--ghost"
+                onClick={() => setShowSettings(true)}
+              >
+                Providers
               </button>
             </div>
           </div>
@@ -487,6 +512,13 @@ export default function App() {
           )}
         </div>
       </div>
+
+      {showSettings && (
+        <ProviderSettings
+          onClose={() => setShowSettings(false)}
+          onChanged={() => void refreshProviders()}
+        />
+      )}
     </div>
   );
 }
