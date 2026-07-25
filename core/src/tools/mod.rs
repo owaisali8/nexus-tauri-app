@@ -6,6 +6,7 @@
 //! they run, never after.
 
 pub mod builtin;
+pub mod mcp;
 
 use std::{collections::HashMap, sync::Arc};
 

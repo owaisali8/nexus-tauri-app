@@ -61,6 +61,39 @@ export function listTools(): Promise<ToolSpec[]> {
   return invoke("list_tools");
 }
 
+export type McpServerConfig = {
+  id: string;
+  command: string;
+  args: string[];
+  env: Record<string, string>;
+  enabled: boolean;
+};
+
+export type McpServerView = McpServerConfig & {
+  connected: boolean;
+  /** Tool names this server currently contributes. */
+  tools: string[];
+  /** Why it failed to start, when it did. */
+  error: string | null;
+};
+
+export function listMcpServers(): Promise<McpServerView[]> {
+  return invoke("list_mcp_servers");
+}
+
+/** Save and reconnect. Resolves with the servers that failed to start. */
+export function saveMcpServer(server: McpServerConfig): Promise<string[]> {
+  return invoke("save_mcp_server", { server });
+}
+
+export function deleteMcpServer(serverId: string): Promise<string[]> {
+  return invoke("delete_mcp_server", { serverId });
+}
+
+export function reconnectMcp(): Promise<string[]> {
+  return invoke("reconnect_mcp");
+}
+
 /**
  * Answer a pending approval prompt.
  *

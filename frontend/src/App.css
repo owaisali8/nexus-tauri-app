@@ -781,6 +781,12 @@ textarea {
   cursor: pointer;
 }
 
+.mcp-row__error {
+  font-size: var(--text-xs);
+  color: var(--danger);
+  overflow-wrap: anywhere;
+}
+
 .check--off {
   opacity: 0.5;
   cursor: not-allowed;

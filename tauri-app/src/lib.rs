@@ -19,7 +19,11 @@ use essentio_core::{
     },
     memory::{Message, Session, Store},
     providers::{ChatTransport, ModelInfo, ProviderConfig, ProviderKind, build_transport},
-    tools::{Approval, ToolRegistry, ToolSpec, builtin::registry_with_notes},
+    tools::{
+        Approval, ToolRegistry, ToolSpec,
+        builtin::registry_with_notes,
+        mcp::{McpManager, McpServerConfig},
+    },
 };
 
 use approval::ApprovalRouter;
@@ -28,6 +32,7 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, State, ipc::Channel};
 
 const PROVIDERS_FILE: &str = "providers.json";
+const MCP_FILE: &str = "mcp.json";
 
 /// Cancellation registry: run id -> abort handle for the pump task.
 #[derive(Default)]
@@ -67,7 +72,17 @@ struct AppState {
     /// this is about avoiding rebuild cost — and for ADK, about keeping its
     /// hydrated session cache warm.
     engines: Mutex<HashMap<String, Arc<dyn AgentEngine>>>,
-    tools: ToolRegistry,
+    /// Built-ins plus every connected MCP server's tools.
+    ///
+    /// Behind a lock because connecting or disconnecting a server rebuilds it
+    /// while the app is running.
+    tools: Mutex<ToolRegistry>,
+    /// Tools available with no MCP server attached; the base for a rebuild.
+    builtin_tools: ToolRegistry,
+    /// Held so the child processes stay alive for the life of the app.
+    mcp: Mutex<Arc<McpManager>>,
+    /// Servers that failed to start, surfaced to the UI rather than only logged.
+    mcp_failures: Mutex<Vec<String>>,
     /// Shared by every engine; prompts are routed by run id, which is why
     /// caching engines across conversations stays safe.
     approvals: Arc<ApprovalRouter>,
@@ -75,13 +90,61 @@ struct AppState {
 
 impl AppState {
     fn new(store: Store, notes_dir: PathBuf) -> Self {
+        let builtin_tools = registry_with_notes(notes_dir);
         Self {
             runs: Arc::new(RunRegistry::default()),
             store,
             engines: Mutex::new(HashMap::new()),
-            tools: registry_with_notes(notes_dir),
+            tools: Mutex::new(builtin_tools.clone()),
+            builtin_tools,
+            mcp: Mutex::new(Arc::new(McpManager::new())),
+            mcp_failures: Mutex::new(Vec::new()),
             approvals: Arc::new(ApprovalRouter::new()),
         }
+    }
+
+    fn tool_registry(&self) -> Result<ToolRegistry, String> {
+        Ok(self
+            .tools
+            .lock()
+            .map_err(|_| "tool registry poisoned".to_string())?
+            .clone())
+    }
+
+    /// Reconnect every configured MCP server and rebuild the tool registry.
+    ///
+    /// Engines are dropped afterwards because each holds a snapshot of the
+    /// registry taken when it was built.
+    async fn reload_mcp(&self, configs: &[McpServerConfig]) -> Result<Vec<String>, String> {
+        let (manager, failures) = McpManager::connect_all(configs).await;
+
+        let mut registry = self.builtin_tools.clone();
+        manager.register_into(&mut registry);
+
+        {
+            let mut slot = self
+                .tools
+                .lock()
+                .map_err(|_| "tool registry poisoned".to_string())?;
+            *slot = registry;
+        }
+        {
+            let mut slot = self
+                .mcp
+                .lock()
+                .map_err(|_| "mcp lock poisoned".to_string())?;
+            // Replacing the manager drops the previous one, terminating the
+            // child processes it owned.
+            *slot = Arc::new(manager);
+        }
+        if let Ok(mut slot) = self.mcp_failures.lock() {
+            slot.clone_from(&failures);
+        }
+        if let Ok(mut engines) = self.engines.lock() {
+            engines.clear();
+        }
+
+        Ok(failures)
     }
 
     fn engine(
@@ -96,19 +159,28 @@ impl AppState {
             .lock()
             .map_err(|_| "engine cache poisoned".to_string())?;
 
-        Ok(engines
-            .entry(cache_key)
-            .or_insert_with(|| {
-                build_engine(
-                    kind,
-                    provider.clone(),
-                    api_key,
-                    self.store.clone(),
-                    self.tools.clone(),
-                    self.approvals.clone(),
-                )
-            })
-            .clone())
+        if let Some(existing) = engines.get(&cache_key) {
+            return Ok(existing.clone());
+        }
+
+        // Take the registry snapshot outside the entry closure so a poisoned
+        // tool lock surfaces as an error rather than a panic.
+        let tools = self
+            .tools
+            .lock()
+            .map_err(|_| "tool registry poisoned".to_string())?
+            .clone();
+
+        let engine = build_engine(
+            kind,
+            provider.clone(),
+            api_key,
+            self.store.clone(),
+            tools,
+            self.approvals.clone(),
+        );
+        engines.insert(cache_key, engine.clone());
+        Ok(engine)
     }
 
     /// Drop cached engines for a provider so config edits take effect.
@@ -405,10 +477,131 @@ fn cancel_run(state: State<'_, AppState>, run_id: String) -> bool {
     state.runs.abort(&run_id)
 }
 
-/// Tools available to a run.
+/// Tools available to a run, built-ins plus any connected MCP server.
 #[tauri::command]
-fn list_tools(state: State<'_, AppState>) -> Vec<ToolSpec> {
-    state.tools.specs()
+fn list_tools(state: State<'_, AppState>) -> Result<Vec<ToolSpec>, String> {
+    Ok(state.tool_registry()?.specs())
+}
+
+fn load_mcp_servers(app: &AppHandle) -> Result<Vec<McpServerConfig>, String> {
+    let path = app_data_dir(app)?.join(MCP_FILE);
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+
+    let raw = fs::read_to_string(&path)
+        .map_err(|error| format!("could not read {}: {error}", path.display()))?;
+    serde_json::from_str(&raw).map_err(|error| format!("malformed MCP config: {error}"))
+}
+
+fn write_mcp_servers(app: &AppHandle, servers: &[McpServerConfig]) -> Result<(), String> {
+    let path = app_data_dir(app)?.join(MCP_FILE);
+    let raw = serde_json::to_string_pretty(servers)
+        .map_err(|error| format!("could not serialize MCP config: {error}"))?;
+    fs::write(&path, raw).map_err(|error| format!("could not write {}: {error}", path.display()))
+}
+
+/// An MCP server plus its live status.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct McpServerView {
+    #[serde(flatten)]
+    config: McpServerConfig,
+    connected: bool,
+    /// Tool names this server currently contributes.
+    tools: Vec<String>,
+    /// Why it failed to start, when it did.
+    error: Option<String>,
+}
+
+#[tauri::command]
+fn list_mcp_servers(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<Vec<McpServerView>, String> {
+    let configs = load_mcp_servers(&app)?;
+    let connected = state
+        .mcp
+        .lock()
+        .map_err(|_| "mcp lock poisoned".to_string())?
+        .server_ids();
+    let failures = state
+        .mcp_failures
+        .lock()
+        .map(|slot| slot.clone())
+        .unwrap_or_default();
+    let registry = state.tool_registry()?;
+
+    Ok(configs
+        .into_iter()
+        .map(|config| {
+            let is_connected = connected.iter().any(|id| id == &config.id);
+            let tools = registry
+                .specs()
+                .into_iter()
+                .filter(|spec| {
+                    essentio_core::tools::mcp::split_namespaced(&spec.name)
+                        .is_some_and(|(server, _)| server == config.id)
+                })
+                .map(|spec| spec.name)
+                .collect();
+            let error = failures
+                .iter()
+                .find(|failure| failure.starts_with(&format!("{}:", config.id)))
+                .cloned();
+
+            McpServerView {
+                config,
+                connected: is_connected,
+                tools,
+                error,
+            }
+        })
+        .collect())
+}
+
+/// Add or update a server, then reconnect everything.
+///
+/// Returns the servers that failed to start, so the caller can show them
+/// rather than discovering the absence of tools later.
+#[tauri::command]
+async fn save_mcp_server(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    server: McpServerConfig,
+) -> Result<Vec<String>, String> {
+    server.validate().map_err(|error| error.to_string())?;
+
+    let mut servers = load_mcp_servers(&app)?;
+    match servers.iter().position(|item| item.id == server.id) {
+        Some(index) => servers[index] = server,
+        None => servers.push(server),
+    }
+    write_mcp_servers(&app, &servers)?;
+
+    state.reload_mcp(&servers).await
+}
+
+#[tauri::command]
+async fn delete_mcp_server(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    server_id: String,
+) -> Result<Vec<String>, String> {
+    let servers: Vec<McpServerConfig> = load_mcp_servers(&app)?
+        .into_iter()
+        .filter(|server| server.id != server_id)
+        .collect();
+    write_mcp_servers(&app, &servers)?;
+
+    state.reload_mcp(&servers).await
+}
+
+/// Reconnect every configured server without changing the config.
+#[tauri::command]
+async fn reconnect_mcp(app: AppHandle, state: State<'_, AppState>) -> Result<Vec<String>, String> {
+    let servers = load_mcp_servers(&app)?;
+    state.reload_mcp(&servers).await
 }
 
 /// Answer a pending approval prompt.
@@ -571,6 +764,35 @@ pub fn run() {
             // Notes are scoped to the app data dir; the tool refuses to write
             // outside whatever root it is given.
             app.manage(AppState::new(store, data_dir.join("notes")));
+
+            // Connect MCP servers in the background: each one is a process
+            // launch and a handshake, and the window should not wait on a
+            // server that may be slow or broken.
+            let handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                let servers = match load_mcp_servers(&handle) {
+                    Ok(servers) => servers,
+                    Err(error) => {
+                        tracing::error!(%error, "could not read the MCP config");
+                        return;
+                    }
+                };
+                if servers.is_empty() {
+                    return;
+                }
+
+                let state = handle.state::<AppState>();
+                match state.reload_mcp(&servers).await {
+                    Ok(failures) if failures.is_empty() => {
+                        tracing::info!(count = servers.len(), "MCP servers connected");
+                    }
+                    Ok(failures) => {
+                        tracing::warn!(?failures, "some MCP servers failed to start");
+                    }
+                    Err(error) => tracing::error!(%error, "MCP startup failed"),
+                }
+            });
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -587,7 +809,11 @@ pub fn run() {
             get_messages,
             truncate_session,
             list_tools,
-            respond_to_approval
+            respond_to_approval,
+            list_mcp_servers,
+            save_mcp_server,
+            delete_mcp_server,
+            reconnect_mcp
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

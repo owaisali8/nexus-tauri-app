@@ -25,6 +25,7 @@ import {
   type Turn,
 } from "./features/chat/MessageList";
 import { ProviderSettings } from "./features/settings/ProviderSettings";
+import { McpSettings } from "./features/tools/McpSettings";
 import { WindowControls } from "./WindowControls";
 import "./App.css";
 
@@ -82,6 +83,7 @@ export default function App() {
   });
 
   const [showSettings, setShowSettings] = useState(false);
+  const [showMcp, setShowMcp] = useState(false);
   const [tools, setTools] = useState<ToolSpec[]>([]);
   const [toolsEnabled, setToolsEnabled] = useState(false);
 
@@ -133,13 +135,26 @@ export default function App() {
     }
   }, []);
 
+  const refreshTools = useCallback(async () => {
+    try {
+      setTools(await listTools());
+    } catch (error: unknown) {
+      console.error("failed to load tools", error);
+    }
+  }, []);
+
   useEffect(() => {
     void refreshProviders();
     void refreshSessions();
-    listTools()
-      .then(setTools)
-      .catch((error: unknown) => console.error("failed to load tools", error));
-  }, [refreshProviders, refreshSessions]);
+    void refreshTools();
+  }, [refreshProviders, refreshSessions, refreshTools]);
+
+  // MCP servers connect in the background after launch, so the initial tool
+  // list can be short-lived. Re-read it once they have had time to come up.
+  useEffect(() => {
+    const timer = setTimeout(() => void refreshTools(), 2500);
+    return () => clearTimeout(timer);
+  }, [refreshTools]);
 
   const testConnection = useCallback(async (id: string) => {
     setConnection({ status: "testing" });
@@ -687,6 +702,13 @@ export default function App() {
               >
                 Providers
               </button>
+              <button
+                type="button"
+                className="button button--ghost"
+                onClick={() => setShowMcp(true)}
+              >
+                MCP
+              </button>
             </div>
           </div>
 
@@ -773,6 +795,14 @@ export default function App() {
         <ProviderSettings
           onClose={() => setShowSettings(false)}
           onChanged={() => void refreshProviders()}
+        />
+      )}
+
+      {showMcp && (
+        <McpSettings
+          onClose={() => setShowMcp(false)}
+          // Connecting a server changes the tool list.
+          onChanged={() => void refreshTools()}
         />
       )}
     </div>
