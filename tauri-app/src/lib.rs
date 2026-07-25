@@ -17,7 +17,7 @@ use essentio_core::{
     engine::{
         AgentEngine, EngineEvent, EngineKind, RunOptions, SessionId, UserInput, build_engine,
     },
-    memory::{Message, Session, Store},
+    memory::{Agent, Message, Session, Store},
     providers::{ChatTransport, ModelInfo, ProviderConfig, ProviderKind, build_transport},
     rag::{Document, Retriever, embed::OpenAiCompatEmbedder, tool::SearchDocuments},
     tools::{
@@ -589,6 +589,25 @@ fn set_embedding_config(
 }
 
 #[tauri::command]
+fn list_agents(state: State<'_, AppState>) -> Result<Vec<Agent>, String> {
+    state.store.list_agents().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn save_agent(state: State<'_, AppState>, agent: Agent) -> Result<Agent, String> {
+    state.store.save_agent(&agent).map_err(|e| e.to_string())
+}
+
+/// Delete an agent. Conversations held with it survive, unattached.
+#[tauri::command]
+fn delete_agent(state: State<'_, AppState>, agent_id: String) -> Result<bool, String> {
+    state
+        .store
+        .delete_agent(&agent_id)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn list_documents(state: State<'_, AppState>) -> Result<Vec<Document>, String> {
     state.store.list_documents().map_err(|e| e.to_string())
 }
@@ -803,6 +822,9 @@ struct CreateSessionRequest {
     model: String,
     #[serde(default)]
     engine: EngineKind,
+    /// Agent to hold this conversation with. Absent is plain chat.
+    #[serde(default)]
+    agent_id: Option<String>,
 }
 
 #[tauri::command]
@@ -819,7 +841,13 @@ fn create_session(
 
     state
         .store
-        .create_session(title, &request.provider_id, &request.model, request.engine)
+        .create_session(
+            title,
+            &request.provider_id,
+            &request.model,
+            request.engine,
+            request.agent_id.as_deref(),
+        )
         .map_err(|e| e.to_string())
 }
 
@@ -1003,7 +1031,10 @@ pub fn run() {
             set_embedding_config,
             list_documents,
             ingest_document,
-            delete_document
+            delete_document,
+            list_agents,
+            save_agent,
+            delete_agent
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

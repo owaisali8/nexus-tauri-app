@@ -36,7 +36,13 @@ fn conversations_survive_reopening_the_database() {
     let session_id = {
         let store = Store::open(&db.0).unwrap();
         let session = store
-            .create_session("Persisted chat", "lmstudio-local", "qwen", EngineKind::Adk)
+            .create_session(
+                "Persisted chat",
+                "lmstudio-local",
+                "qwen",
+                EngineKind::Adk,
+                None,
+            )
             .unwrap();
 
         store
@@ -76,7 +82,7 @@ fn migrations_are_safe_to_run_against_an_existing_database() {
     let id = {
         let store = Store::open(&db.0).unwrap();
         store
-            .create_session("keep me", "p", "m", EngineKind::Direct)
+            .create_session("keep me", "p", "m", EngineKind::Direct, None)
             .unwrap()
             .id
     };

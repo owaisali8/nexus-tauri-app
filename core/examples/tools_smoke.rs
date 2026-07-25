@@ -33,7 +33,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     let store = Store::open_in_memory()?;
-    let session = store.create_session("tools", "lmstudio-local", &model.id, EngineKind::Direct)?;
+    let session = store.create_session(
+        "tools",
+        "lmstudio-local",
+        &model.id,
+        EngineKind::Direct,
+        None,
+    )?;
 
     let registry = default_registry();
     println!(

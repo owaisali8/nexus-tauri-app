@@ -160,7 +160,37 @@ export type Session = {
   engine: EngineKind;
   createdAt: number;
   updatedAt: number;
+  /** The agent this conversation is with; null is plain chat. */
+  agentId: string | null;
 };
+
+/** A named bundle of instructions, model and tools. */
+export type Agent = {
+  id: string;
+  name: string;
+  description: string;
+  instructions: string;
+  providerId: string;
+  model: string;
+  temperature: number | null;
+  toolIds: string[];
+  engine: EngineKind;
+  createdAt: number;
+  updatedAt: number;
+};
+
+export function listAgents(): Promise<Agent[]> {
+  return invoke("list_agents");
+}
+
+/** Create or update. An empty `id` creates. */
+export function saveAgent(agent: Agent): Promise<Agent> {
+  return invoke("save_agent", { agent });
+}
+
+export function deleteAgent(agentId: string): Promise<boolean> {
+  return invoke("delete_agent", { agentId });
+}
 
 /** A persisted transcript entry. `seq` is the ordering key, not `createdAt`. */
 export type Message = {
@@ -181,6 +211,7 @@ export function createSession(request: {
   providerId: string;
   model: string;
   engine?: EngineKind;
+  agentId?: string | null;
 }): Promise<Session> {
   return invoke("create_session", { request });
 }

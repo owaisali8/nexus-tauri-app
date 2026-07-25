@@ -238,7 +238,7 @@ mod tests {
     async fn user_turn_is_persisted_even_when_the_server_is_unreachable() {
         let store = Store::open_in_memory().unwrap();
         let session = store
-            .create_session("s", "lmstudio-local", "any", EngineKind::Direct)
+            .create_session("s", "lmstudio-local", "any", EngineKind::Direct, None)
             .unwrap();
 
         let mut provider = ProviderConfig::lm_studio();

@@ -18,6 +18,7 @@ use crate::{Error, Result, engine::EngineKind, providers::openai_compat::ChatMes
 const MIGRATIONS: &[(i64, &str)] = &[
     (1, include_str!("../../db/migrations/0001_sessions.sql")),
     (2, include_str!("../../db/migrations/0002_documents.sql")),
+    (3, include_str!("../../db/migrations/0003_agents.sql")),
 ];
 
 /// Tables every migrated database must have.
@@ -27,7 +28,14 @@ const MIGRATIONS: &[(i64, &str)] = &[
 /// same version numbers, causing migrations to be skipped and leaving the
 /// tables absent. Failing here with a clear message beats failing later with
 /// "no such table" from whatever query happens to run first.
-const EXPECTED_TABLES: &[&str] = &["sessions", "messages", "settings", "documents", "chunks"];
+const EXPECTED_TABLES: &[&str] = &[
+    "sessions",
+    "messages",
+    "settings",
+    "documents",
+    "chunks",
+    "agents",
+];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -39,6 +47,50 @@ pub struct Session {
     pub engine: EngineKind,
     pub created_at: i64,
     pub updated_at: i64,
+    /// The agent this conversation is with. `None` is plain chat.
+    #[serde(default)]
+    pub agent_id: Option<String>,
+}
+
+/// A named bundle of instructions, model, and tools.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Agent {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    /// System prompt. May be empty — an agent can exist only to pin a model
+    /// and a tool set.
+    #[serde(default)]
+    pub instructions: String,
+    pub provider_id: String,
+    pub model: String,
+    #[serde(default)]
+    pub temperature: Option<f32>,
+    /// Tool names this agent may call.
+    #[serde(default)]
+    pub tool_ids: Vec<String>,
+    #[serde(default)]
+    pub engine: EngineKind,
+    #[serde(default)]
+    pub created_at: i64,
+    #[serde(default)]
+    pub updated_at: i64,
+}
+
+impl Agent {
+    pub fn validate(&self) -> Result<()> {
+        if self.name.trim().is_empty() {
+            return Err(Error::Invalid("an agent needs a name".to_string()));
+        }
+        if self.provider_id.trim().is_empty() || self.model.trim().is_empty() {
+            return Err(Error::Invalid(
+                "an agent needs a provider and a model".to_string(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -75,6 +127,21 @@ fn now() -> i64 {
 
 fn db_error(error: rusqlite::Error) -> Error {
     Error::Transport(format!("database error: {error}"))
+}
+
+/// Tables currently in the file, for diagnostics.
+///
+/// Returns an empty list on failure: this only ever decorates an error that is
+/// already being reported, and must not mask it.
+fn table_names(connection: &Connection) -> Vec<String> {
+    connection
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'table'")
+        .and_then(|mut statement| {
+            statement
+                .query_map([], |row| row.get(0))?
+                .collect::<rusqlite::Result<Vec<String>>>()
+        })
+        .unwrap_or_default()
 }
 
 /// Handle to the conversation database.
@@ -188,7 +255,20 @@ impl Store {
                     continue;
                 }
 
-                connection.execute_batch(sql).map_err(db_error)?;
+                // A migration that fails usually means the ledger belongs to a
+                // different schema lineage, so it claimed earlier versions were
+                // applied and this one is building on tables that never
+                // existed. Report what is actually in the file — the bare SQL
+                // error alone sends people looking in the wrong place.
+                connection.execute_batch(sql).map_err(|error| {
+                    Error::Transport(format!(
+                        "migration {version} failed: {error}. \
+                         The database may belong to an incompatible schema \
+                         (tables present: [{}]). Move or delete it and restart \
+                         to get a fresh database.",
+                        table_names(connection).join(", ")
+                    ))
+                })?;
                 connection
                     .execute(
                         "INSERT INTO schema_migrations (version) VALUES (?1)",
@@ -207,6 +287,7 @@ impl Store {
         provider_id: &str,
         model: &str,
         engine: EngineKind,
+        agent_id: Option<&str>,
     ) -> Result<Session> {
         let session = Session {
             id: uuid::Uuid::new_v4().to_string(),
@@ -216,13 +297,15 @@ impl Store {
             engine,
             created_at: now(),
             updated_at: now(),
+            agent_id: agent_id.map(str::to_string),
         };
 
         self.with_connection(|connection| {
             connection
                 .execute(
-                    "INSERT INTO sessions (id, title, provider_id, model, engine, created_at, updated_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    "INSERT INTO sessions
+                       (id, title, provider_id, model, engine, created_at, updated_at, agent_id)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                     params![
                         session.id,
                         session.title,
@@ -231,6 +314,7 @@ impl Store {
                         engine_to_str(session.engine),
                         session.created_at,
                         session.updated_at,
+                        session.agent_id,
                     ],
                 )
                 .map_err(db_error)?;
@@ -240,12 +324,101 @@ impl Store {
         Ok(session)
     }
 
+    // ---- agents ----
+
+    pub fn list_agents(&self) -> Result<Vec<Agent>> {
+        self.with_connection(|connection| {
+            let mut statement = connection
+                .prepare(
+                    "SELECT id, name, description, instructions, provider_id, model,
+                            temperature, tool_ids, engine, created_at, updated_at
+                     FROM agents ORDER BY name COLLATE NOCASE",
+                )
+                .map_err(db_error)?;
+
+            let rows = statement.query_map([], read_agent).map_err(db_error)?;
+            rows.collect::<rusqlite::Result<Vec<_>>>().map_err(db_error)
+        })
+    }
+
+    pub fn get_agent(&self, agent_id: &str) -> Result<Option<Agent>> {
+        self.with_connection(|connection| {
+            connection
+                .query_row(
+                    "SELECT id, name, description, instructions, provider_id, model,
+                            temperature, tool_ids, engine, created_at, updated_at
+                     FROM agents WHERE id = ?1",
+                    params![agent_id],
+                    read_agent,
+                )
+                .optional()
+                .map_err(db_error)
+        })
+    }
+
+    /// Insert or update an agent, returning the stored version.
+    pub fn save_agent(&self, agent: &Agent) -> Result<Agent> {
+        agent.validate()?;
+
+        let mut stored = agent.clone();
+        if stored.id.trim().is_empty() {
+            stored.id = uuid::Uuid::new_v4().to_string();
+        }
+        stored.updated_at = now();
+        if stored.created_at == 0 {
+            stored.created_at = stored.updated_at;
+        }
+
+        let tool_ids = serde_json::to_string(&stored.tool_ids)?;
+
+        self.with_connection(|connection| {
+            connection
+                .execute(
+                    "INSERT INTO agents
+                       (id, name, description, instructions, provider_id, model,
+                        temperature, tool_ids, engine, created_at, updated_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                     ON CONFLICT(id) DO UPDATE SET
+                       name = ?2, description = ?3, instructions = ?4, provider_id = ?5,
+                       model = ?6, temperature = ?7, tool_ids = ?8, engine = ?9,
+                       updated_at = ?11",
+                    params![
+                        stored.id,
+                        stored.name,
+                        stored.description,
+                        stored.instructions,
+                        stored.provider_id,
+                        stored.model,
+                        stored.temperature,
+                        tool_ids,
+                        engine_to_str(stored.engine),
+                        stored.created_at,
+                        stored.updated_at,
+                    ],
+                )
+                .map_err(db_error)?;
+            Ok(())
+        })?;
+
+        Ok(stored)
+    }
+
+    /// Delete an agent. Conversations held with it survive, unattached.
+    pub fn delete_agent(&self, agent_id: &str) -> Result<bool> {
+        self.with_connection(|connection| {
+            let removed = connection
+                .execute("DELETE FROM agents WHERE id = ?1", params![agent_id])
+                .map_err(db_error)?;
+            Ok(removed > 0)
+        })
+    }
+
     /// Sessions newest-first, for the conversation list.
     pub fn list_sessions(&self) -> Result<Vec<Session>> {
         self.with_connection(|connection| {
             let mut statement = connection
                 .prepare(
-                    "SELECT id, title, provider_id, model, engine, created_at, updated_at
+                    "SELECT id, title, provider_id, model, engine, created_at, updated_at, agent_id
                      FROM sessions ORDER BY updated_at DESC",
                 )
                 .map_err(db_error)?;
@@ -260,6 +433,7 @@ impl Store {
                         engine: engine_from_str(&row.get::<_, String>(4)?),
                         created_at: row.get(5)?,
                         updated_at: row.get(6)?,
+                        agent_id: row.get(7)?,
                     })
                 })
                 .map_err(db_error)?;
@@ -272,7 +446,7 @@ impl Store {
         self.with_connection(|connection| {
             connection
                 .query_row(
-                    "SELECT id, title, provider_id, model, engine, created_at, updated_at
+                    "SELECT id, title, provider_id, model, engine, created_at, updated_at, agent_id
                      FROM sessions WHERE id = ?1",
                     params![session_id],
                     |row| {
@@ -284,6 +458,7 @@ impl Store {
                             engine: engine_from_str(&row.get::<_, String>(4)?),
                             created_at: row.get(5)?,
                             updated_at: row.get(6)?,
+                            agent_id: row.get(7)?,
                         })
                     },
                 )
@@ -582,6 +757,28 @@ impl Store {
     }
 }
 
+/// Map an agents row.
+///
+/// A malformed `tool_ids` JSON falls back to no tools rather than failing the
+/// read: an agent that lost its tool list is still usable for chat, and a
+/// broken row must not make the whole list unloadable.
+fn read_agent(row: &rusqlite::Row<'_>) -> rusqlite::Result<Agent> {
+    let tool_ids: String = row.get(7)?;
+    Ok(Agent {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        description: row.get(2)?,
+        instructions: row.get(3)?,
+        provider_id: row.get(4)?,
+        model: row.get(5)?,
+        temperature: row.get(6)?,
+        tool_ids: serde_json::from_str(&tool_ids).unwrap_or_default(),
+        engine: engine_from_str(&row.get::<_, String>(8)?),
+        created_at: row.get(9)?,
+        updated_at: row.get(10)?,
+    })
+}
+
 fn engine_to_str(kind: EngineKind) -> &'static str {
     match kind {
         EngineKind::Direct => "direct",
@@ -618,7 +815,13 @@ mod tests {
     fn sessions_round_trip() {
         let store = store();
         let created = store
-            .create_session("First chat", "lmstudio-local", "qwen", EngineKind::Adk)
+            .create_session(
+                "First chat",
+                "lmstudio-local",
+                "qwen",
+                EngineKind::Adk,
+                None,
+            )
             .unwrap();
 
         let loaded = store.get_session(&created.id).unwrap().unwrap();
@@ -631,7 +834,7 @@ mod tests {
     fn messages_keep_insertion_order() {
         let store = store();
         let session = store
-            .create_session("s", "p", "m", EngineKind::Direct)
+            .create_session("s", "p", "m", EngineKind::Direct, None)
             .unwrap();
 
         for index in 0..5 {
@@ -651,7 +854,7 @@ mod tests {
     fn deleting_a_session_cascades_to_messages() {
         let store = store();
         let session = store
-            .create_session("s", "p", "m", EngineKind::Direct)
+            .create_session("s", "p", "m", EngineKind::Direct, None)
             .unwrap();
         store.append_message(&session.id, "user", "hello").unwrap();
 
@@ -665,7 +868,7 @@ mod tests {
     fn appending_bumps_session_updated_at() {
         let store = store();
         let session = store
-            .create_session("s", "p", "m", EngineKind::Direct)
+            .create_session("s", "p", "m", EngineKind::Direct, None)
             .unwrap();
         store.append_message(&session.id, "user", "hello").unwrap();
 
@@ -677,7 +880,7 @@ mod tests {
     fn truncate_removes_the_tail_and_leaves_earlier_turns() {
         let store = store();
         let session = store
-            .create_session("s", "p", "m", EngineKind::Direct)
+            .create_session("s", "p", "m", EngineKind::Direct, None)
             .unwrap();
 
         for index in 0..4 {
@@ -699,7 +902,7 @@ mod tests {
     fn appending_after_truncate_continues_cleanly() {
         let store = store();
         let session = store
-            .create_session("s", "p", "m", EngineKind::Direct)
+            .create_session("s", "p", "m", EngineKind::Direct, None)
             .unwrap();
 
         store.append_message(&session.id, "user", "keep").unwrap();

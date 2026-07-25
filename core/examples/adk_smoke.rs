@@ -34,7 +34,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // In-memory store: this exercises the engine, not durability.
     let store = Store::open_in_memory()?;
-    let session = store.create_session("smoke", "lmstudio-local", &model.id, EngineKind::Adk)?;
+    let session =
+        store.create_session("smoke", "lmstudio-local", &model.id, EngineKind::Adk, None)?;
     let engine = AdkEngine::new(provider, None, store.clone());
 
     let mut opts = RunOptions::new("lmstudio-local", &model.id);
@@ -102,8 +103,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     opts.system_prompt = Some("You are a Rust expert. Answer directly.".to_string());
     opts.temperature = Some(0.3);
 
-    let bracket_session =
-        store.create_session("brackets", "lmstudio-local", &model.id, EngineKind::Adk)?;
+    let bracket_session = store.create_session(
+        "brackets",
+        "lmstudio-local",
+        &model.id,
+        EngineKind::Adk,
+        None,
+    )?;
     let mut stream = engine
         .run_stream(
             bracket_session.id.into(),
