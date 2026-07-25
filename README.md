@@ -7,20 +7,43 @@ endpoint) or cloud providers, with conversations stored on your machine.
 
 ## Status
 
-Phase 1 complete: chat, persistence, and provider management work end to end.
-Tools, MCP, RAG and research are not built yet.
+Chat, persistence, provider management, tool calling and MCP work end to end.
+RAG and deep research are not built yet.
+
+"Verified live" below means exercised against the real service or a real
+server, not merely unit-tested.
 
 | Area | State |
 |---|---|
-| Streaming chat | works |
+| Streaming chat | verified live |
 | LM Studio / Ollama / OpenAI-compatible | verified live |
-| Google Gemini | verified live |
+| Google Gemini | verified live, including tool calling |
 | OpenAI / DeepSeek | implemented, not verified against the live API |
-| Anthropic | implemented, **not verified against the live API** |
-| Conversation persistence | works, survives restart |
+| Anthropic | implemented, **not verified**, and cannot carry tools |
+| Conversation persistence | verified, survives restart |
 | Markdown + syntax highlighting | works |
 | Regenerate, edit-and-resend | works |
-| Tools / MCP / RAG / research | not started |
+| Tool calling + approval gate | verified live |
+| Built-in tools (`current_time`, `write_note`) | verified live |
+| MCP servers | verified live, incl. through chat |
+| Tools on the ADK engine | not wired — Direct only |
+| RAG / deep research / documents | not started |
+
+## Tools and approval
+
+A tool declares whether it is read-only or side-effecting. Side-effecting
+calls are held until you approve them; an unanswered prompt times out to
+*deny*, and cancelling a run denies whatever it left waiting.
+
+**Every MCP tool is treated as side-effecting**, including ones a server marks
+read-only. That marking is self-attestation from third-party code, and
+honouring it would let a server opt itself out of the only check between it
+and your machine. The cost is a prompt per call; the fix is per-tool trust you
+grant, which is not built yet.
+
+MCP servers are configured in `mcp.json` and launched as child processes.
+Command names are resolved through `PATHEXT`, so `npx` works on Windows where
+a plain PATH search would not find the `.cmd` shim.
 
 ## Architecture
 
@@ -31,7 +54,8 @@ core/          engine-agnostic product logic
     direct/    framework-free implementation over the provider transports
   providers/   ChatTransport per wire format: openai_compat, anthropic, gemini
   memory/      SQLite store for sessions, messages, settings
-tauri-app/     shell: commands, streaming channel, OS keychain
+  tools/       Tool trait, approval gate, built-ins, MCP client
+tauri-app/     shell: commands, streaming channel, OS keychain, approval router
 frontend/      React 19 + TypeScript
 ```
 
@@ -93,15 +117,25 @@ These need LM Studio running and are excluded from `cargo test`:
 ```bash
 cargo run -p essentio-core --example lmstudio_smoke   # direct transport
 cargo run -p essentio-core --example adk_smoke        # ADK engine + persistence
+cargo run -p essentio-core --example tools_smoke      # tool call -> execute -> answer
 ```
 
 `adk_smoke` also guards a regression where ADK's own transport silently
 discarded everything after the first `<` or `[` in a reply.
 
+This one needs `npx` rather than LM Studio, and downloads a server on first
+run:
+
+```bash
+cargo run -p essentio-core --example mcp_smoke        # real MCP server round trip
+```
+
 ## Data locations
 
 - Database: `<app data>/workspace.sqlite3`
 - Provider config: `<app data>/providers.json`
+- MCP servers: `<app data>/mcp.json`
+- Notes written by `write_note`: `<app data>/notes/`
 - API keys: OS keychain, service `com.owais.essentio`
 
 On Windows `<app data>` is `%APPDATA%\com.owais.essentio`.
