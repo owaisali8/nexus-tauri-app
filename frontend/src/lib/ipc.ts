@@ -23,7 +23,11 @@ export type ProviderConfig = {
 };
 
 /** Provider as returned to the UI — reports secret presence, never its value. */
-export type ProviderView = ProviderConfig & { hasApiKey: boolean };
+export type ProviderView = ProviderConfig & {
+  hasApiKey: boolean;
+  /** Whether this provider's transport forwards tool calls. */
+  supportsTools: boolean;
+};
 
 export type ModelInfo = { id: string; owned_by?: string | null };
 

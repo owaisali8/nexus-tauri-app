@@ -16,15 +16,44 @@ use crate::{
         ChatRequest, ChatTransport, ModelInfo, ProviderConfig, openai_compat::ChatMessage,
         split_system,
     },
+    tools::{ToolCall, ToolSpec},
 };
 
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct GenerateRequest {
     contents: Vec<GeminiContent>,
     #[serde(skip_serializing_if = "Option::is_none")]
     system_instruction: Option<GeminiContent>,
     #[serde(skip_serializing_if = "Option::is_none")]
     generation_config: Option<GenerationConfig>,
+    /// Gemini nests declarations under a `tools` array, unlike OpenAI's flat
+    /// list of function objects.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    tools: Vec<GeminiTools>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GeminiTools {
+    function_declarations: Vec<FunctionDeclaration>,
+}
+
+#[derive(Debug, Serialize)]
+struct FunctionDeclaration {
+    name: String,
+    description: String,
+    parameters: serde_json::Value,
+}
+
+impl From<ToolSpec> for FunctionDeclaration {
+    fn from(spec: ToolSpec) -> Self {
+        Self {
+            name: spec.name,
+            description: spec.description,
+            parameters: spec.parameters,
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -35,9 +64,57 @@ pub(crate) struct GeminiContent {
     parts: Vec<GeminiPart>,
 }
 
+/// One part of a Gemini message.
+///
+/// Untagged so each variant serializes as the bare object the API expects,
+/// rather than being wrapped in a discriminant.
 #[derive(Debug, Serialize)]
-pub(crate) struct GeminiPart {
-    text: String,
+#[serde(untagged)]
+pub(crate) enum GeminiPart {
+    Text {
+        text: String,
+    },
+    #[serde(rename_all = "camelCase")]
+    FunctionCall {
+        function_call: FunctionCallPayload,
+    },
+    #[serde(rename_all = "camelCase")]
+    FunctionResponse {
+        function_response: FunctionResponsePayload,
+    },
+}
+
+impl GeminiPart {
+    fn text(text: impl Into<String>) -> Self {
+        Self::Text { text: text.into() }
+    }
+
+    /// The text of this part, for tests and for merging adjacent turns.
+    fn as_text(&self) -> Option<&str> {
+        match self {
+            Self::Text { text } => Some(text),
+            _ => None,
+        }
+    }
+
+    fn push_text(&mut self, extra: &str) {
+        if let Self::Text { text } = self {
+            text.push_str(extra);
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct FunctionCallPayload {
+    name: String,
+    args: serde_json::Value,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct FunctionResponsePayload {
+    name: String,
+    /// Gemini expects an object here, not a bare string.
+    response: serde_json::Value,
 }
 
 #[derive(Debug, Serialize)]
@@ -65,6 +142,8 @@ struct GeminiModel {
 #[derive(Debug, PartialEq)]
 pub(crate) enum Chunk {
     Text(String),
+    /// The model asked for one or more tools.
+    Calls(Vec<ToolCall>),
     Usage(Usage),
     /// Generation stopped for a reason the user should see, e.g. a safety
     /// filter. Without this a blocked reply would look like an empty answer.
@@ -94,10 +173,38 @@ pub(crate) fn parse_chunk(data: &str) -> Result<Chunk> {
     let candidate = value.get("candidates").and_then(|c| c.get(0));
 
     if let Some(candidate) = candidate {
-        let text: String = candidate
+        let parts = candidate
             .get("content")
             .and_then(|c| c.get("parts"))
-            .and_then(|p| p.as_array())
+            .and_then(|p| p.as_array());
+
+        // Function calls take precedence: a chunk carrying one may also carry
+        // filler text, and dropping the call would strand the run.
+        if let Some(parts) = parts {
+            let calls: Vec<ToolCall> = parts
+                .iter()
+                .filter_map(|part| part.get("functionCall"))
+                .filter_map(|call| {
+                    let name = call.get("name")?.as_str()?.to_string();
+                    Some(ToolCall {
+                        // Gemini does not assign call ids, so the name is the
+                        // only stable handle for pairing a result back.
+                        id: name.clone(),
+                        name,
+                        arguments: call
+                            .get("args")
+                            .cloned()
+                            .unwrap_or_else(|| serde_json::json!({})),
+                    })
+                })
+                .collect();
+
+            if !calls.is_empty() {
+                return Ok(Chunk::Calls(calls));
+            }
+        }
+
+        let text: String = parts
             .map(|parts| {
                 parts
                     .iter()
@@ -138,12 +245,52 @@ pub(crate) fn parse_chunk(data: &str) -> Result<Chunk> {
 
 /// Convert a transcript to Gemini `contents`.
 ///
-/// Maps `assistant` to `model`, drops empty turns, and merges runs of the
-/// same role so the conversation alternates.
+/// Maps `assistant` to `model`, drops empty turns, merges adjacent text turns
+/// of the same role, and translates OpenAI-shaped tool traffic into Gemini's
+/// functionCall / functionResponse parts.
 pub(crate) fn to_contents(messages: Vec<ChatMessage>) -> Vec<GeminiContent> {
     let mut out: Vec<GeminiContent> = Vec::new();
 
     for message in messages {
+        // An assistant turn requesting tools.
+        if !message.tool_calls.is_empty() {
+            out.push(GeminiContent {
+                role: Some("model".to_string()),
+                parts: message
+                    .tool_calls
+                    .iter()
+                    .map(|call| GeminiPart::FunctionCall {
+                        function_call: FunctionCallPayload {
+                            name: call.function.name.clone(),
+                            // Arguments travel as a JSON string in the OpenAI
+                            // shape; Gemini wants the decoded object.
+                            args: serde_json::from_str(&call.function.arguments)
+                                .unwrap_or_else(|_| serde_json::json!({})),
+                        },
+                    })
+                    .collect(),
+            });
+            continue;
+        }
+
+        // A tool result.
+        if let Some(call_id) = &message.tool_call_id {
+            out.push(GeminiContent {
+                // Gemini expects results on a user turn, not a dedicated role.
+                role: Some("user".to_string()),
+                parts: vec![GeminiPart::FunctionResponse {
+                    function_response: FunctionResponsePayload {
+                        // Our Gemini calls use the tool name as the id, so
+                        // this round-trips correctly.
+                        name: call_id.clone(),
+                        response: serde_json::from_str(&message.content)
+                            .unwrap_or_else(|_| serde_json::json!({ "result": message.content })),
+                    },
+                }],
+            });
+            continue;
+        }
+
         if message.content.trim().is_empty() {
             continue;
         }
@@ -155,17 +302,20 @@ pub(crate) fn to_contents(messages: Vec<ChatMessage>) -> Vec<GeminiContent> {
         };
 
         match out.last_mut() {
-            Some(previous) if previous.role.as_deref() == Some(role) => {
+            // Only merge when the previous turn ends in text; appending to a
+            // functionCall turn would corrupt it.
+            Some(previous)
+                if previous.role.as_deref() == Some(role)
+                    && previous.parts.last().is_some_and(|p| p.as_text().is_some()) =>
+            {
                 if let Some(part) = previous.parts.last_mut() {
-                    part.text.push_str("\n\n");
-                    part.text.push_str(&message.content);
+                    part.push_text("\n\n");
+                    part.push_text(&message.content);
                 }
             }
             _ => out.push(GeminiContent {
                 role: Some(role.to_string()),
-                parts: vec![GeminiPart {
-                    text: message.content,
-                }],
+                parts: vec![GeminiPart::text(message.content)],
             }),
         }
     }
@@ -254,16 +404,17 @@ impl ChatTransport for GeminiClient {
             .collect())
     }
 
+    fn supports_tools(&self) -> bool {
+        true
+    }
+
     async fn chat_stream(&self, request: ChatRequest) -> Result<BoxStream<'static, EngineEvent>> {
-        if !request.tools.is_empty() {
-            // Gemini declares tools as functionDeclarations, a different
-            // shape from the OpenAI `tools` array. Warn rather than drop
-            // silently — see the Anthropic transport for the same reasoning.
-            tracing::warn!(
-                tool_count = request.tools.len(),
-                "the Gemini transport does not forward tools yet; they will be ignored"
-            );
-        }
+        let declarations: Vec<FunctionDeclaration> = request
+            .tools
+            .iter()
+            .cloned()
+            .map(FunctionDeclaration::from)
+            .collect();
 
         let model = request.model.clone();
         let temperature = request.temperature;
@@ -288,11 +439,18 @@ impl ChatTransport for GeminiClient {
                 system_instruction: system.map(|text| GeminiContent {
                     // systemInstruction carries no role.
                     role: None,
-                    parts: vec![GeminiPart { text }],
+                    parts: vec![GeminiPart::text(text)],
                 }),
                 generation_config: temperature.map(|value| GenerationConfig {
                     temperature: Some(value),
                 }),
+                tools: if declarations.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![GeminiTools {
+                        function_declarations: declarations,
+                    }]
+                },
             })
             .send()
             .await
@@ -313,6 +471,8 @@ impl ChatTransport for GeminiClient {
             usage: Option<Usage>,
         }
 
+        // scan yields a stream per chunk, flattened below: one chunk can carry
+        // several function calls, so the mapping is not one-to-one.
         let stream = response
             .bytes_stream()
             .eventsource()
@@ -321,44 +481,44 @@ impl ChatTransport for GeminiClient {
                     return futures::future::ready(None);
                 }
 
-                let next = match item {
+                let events: Vec<EngineEvent> = match item {
                     Err(error) => {
                         state.finished = true;
-                        Some(EngineEvent::Error {
+                        vec![EngineEvent::Error {
                             message: error.to_string(),
-                        })
+                        }]
                     }
                     Ok(event) => match parse_chunk(&event.data) {
-                        Ok(Chunk::Text(text)) => Some(EngineEvent::Token { text }),
+                        Ok(Chunk::Text(text)) => vec![EngineEvent::Token { text }],
+                        Ok(Chunk::Calls(calls)) => calls
+                            .into_iter()
+                            .map(|call| EngineEvent::ToolCall {
+                                id: call.id,
+                                name: call.name,
+                                args: call.arguments,
+                            })
+                            .collect(),
                         Ok(Chunk::Usage(usage)) => {
                             state.usage = Some(usage);
-                            Some(EngineEvent::Token {
-                                text: String::new(),
-                            })
+                            Vec::new()
                         }
                         Ok(Chunk::Blocked(message)) => {
                             state.finished = true;
-                            Some(EngineEvent::Error { message })
+                            vec![EngineEvent::Error { message }]
                         }
-                        Ok(Chunk::Ignore) => Some(EngineEvent::Token {
-                            text: String::new(),
-                        }),
+                        Ok(Chunk::Ignore) => Vec::new(),
                         Err(error) => {
                             state.finished = true;
-                            Some(EngineEvent::Error {
+                            vec![EngineEvent::Error {
                                 message: format!("malformed stream chunk: {error}"),
-                            })
+                            }]
                         }
                     },
                 };
 
-                futures::future::ready(next)
+                futures::future::ready(Some(futures::stream::iter(events)))
             })
-            .filter(|event| {
-                futures::future::ready(
-                    !matches!(event, EngineEvent::Token { text } if text.is_empty()),
-                )
-            });
+            .flatten();
 
         // Gemini closes the stream without an explicit terminal event.
         Ok(crate::engine::ensure_terminal(stream.boxed()))
@@ -477,13 +637,145 @@ mod tests {
             ChatMessage::user("second"),
         ]);
         assert_eq!(contents.len(), 1);
-        assert_eq!(contents[0].parts[0].text, "first\n\nsecond");
+        assert_eq!(contents[0].parts[0].as_text(), Some("first\n\nsecond"));
+    }
+
+    #[test]
+    fn function_calls_are_parsed_from_a_candidate() {
+        let data = r#"{"candidates":[{"content":{"role":"model","parts":[
+            {"functionCall":{"name":"current_time","args":{}}}]}}]}"#;
+
+        match parse_chunk(data).unwrap() {
+            Chunk::Calls(calls) => {
+                assert_eq!(calls.len(), 1);
+                assert_eq!(calls[0].name, "current_time");
+                // Gemini assigns no call id, so the name stands in.
+                assert_eq!(calls[0].id, "current_time");
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn several_function_calls_in_one_chunk_are_all_returned() {
+        let data = r#"{"candidates":[{"content":{"parts":[
+            {"functionCall":{"name":"a","args":{"x":1}}},
+            {"functionCall":{"name":"b","args":{"y":2}}}]}}]}"#;
+
+        match parse_chunk(data).unwrap() {
+            Chunk::Calls(calls) => {
+                assert_eq!(calls.len(), 2);
+                assert_eq!(calls[0].arguments["x"], 1);
+                assert_eq!(calls[1].arguments["y"], 2);
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    /// A chunk mixing prose and a call must not lose the call.
+    #[test]
+    fn a_call_wins_over_text_in_the_same_chunk() {
+        let data = r#"{"candidates":[{"content":{"parts":[
+            {"text":"let me check"},
+            {"functionCall":{"name":"current_time","args":{}}}]}}]}"#;
+
+        assert!(matches!(parse_chunk(data).unwrap(), Chunk::Calls(_)));
+    }
+
+    #[test]
+    fn tool_declarations_are_nested_under_tools() {
+        let request = GenerateRequest {
+            contents: vec![],
+            system_instruction: None,
+            generation_config: None,
+            tools: vec![GeminiTools {
+                function_declarations: vec![FunctionDeclaration::from(ToolSpec {
+                    name: "current_time".to_string(),
+                    description: "the time".to_string(),
+                    parameters: serde_json::json!({ "type": "object" }),
+                })],
+            }],
+        };
+
+        let json = serde_json::to_value(&request).unwrap();
+        assert_eq!(
+            json["tools"][0]["functionDeclarations"][0]["name"],
+            "current_time"
+        );
+    }
+
+    #[test]
+    fn an_assistant_tool_request_becomes_a_function_call_part() {
+        let contents = to_contents(vec![ChatMessage::tool_requests(vec![
+            crate::providers::WireToolCall {
+                id: "current_time".to_string(),
+                kind: "function".to_string(),
+                function: crate::providers::WireFunction {
+                    name: "current_time".to_string(),
+                    arguments: "{\"tz\":\"utc\"}".to_string(),
+                },
+            },
+        ])]);
+
+        let json = serde_json::to_value(&contents).unwrap();
+        assert_eq!(json[0]["role"], "model");
+        assert_eq!(json[0]["parts"][0]["functionCall"]["name"], "current_time");
+        // Arguments arrive as a JSON string and must be decoded for Gemini.
+        assert_eq!(json[0]["parts"][0]["functionCall"]["args"]["tz"], "utc");
+    }
+
+    #[test]
+    fn a_tool_result_becomes_a_function_response_part() {
+        let contents = to_contents(vec![ChatMessage::tool_result(
+            "current_time",
+            r#"{"unix_seconds":123}"#,
+        )]);
+
+        let json = serde_json::to_value(&contents).unwrap();
+        assert_eq!(json[0]["role"], "user");
+        assert_eq!(
+            json[0]["parts"][0]["functionResponse"]["name"],
+            "current_time"
+        );
+        assert_eq!(
+            json[0]["parts"][0]["functionResponse"]["response"]["unix_seconds"],
+            123
+        );
+    }
+
+    /// Gemini requires an object; a plain-string result must still be valid.
+    #[test]
+    fn a_non_object_tool_result_is_wrapped() {
+        let contents = to_contents(vec![ChatMessage::tool_result("t", "just text")]);
+        let json = serde_json::to_value(&contents).unwrap();
+        assert_eq!(
+            json[0]["parts"][0]["functionResponse"]["response"]["result"],
+            "just text"
+        );
+    }
+
+    /// Merging text into a functionCall turn would corrupt it.
+    #[test]
+    fn text_is_not_merged_into_a_function_call_turn() {
+        let contents = to_contents(vec![
+            ChatMessage::tool_requests(vec![crate::providers::WireToolCall {
+                id: "t".to_string(),
+                kind: "function".to_string(),
+                function: crate::providers::WireFunction {
+                    name: "t".to_string(),
+                    arguments: "{}".to_string(),
+                },
+            }]),
+            ChatMessage::assistant("and here is the answer"),
+        ]);
+
+        assert_eq!(contents.len(), 2, "the turns must stay separate");
     }
 
     #[test]
     fn empty_turns_are_dropped() {
         let contents = to_contents(vec![ChatMessage::user("  "), ChatMessage::user("real")]);
         assert_eq!(contents.len(), 1);
-        assert_eq!(contents[0].parts[0].text, "real");
+        assert_eq!(contents[0].parts[0].as_text(), Some("real"));
     }
 }

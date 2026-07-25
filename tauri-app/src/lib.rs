@@ -18,7 +18,7 @@ use essentio_core::{
         AgentEngine, EngineEvent, EngineKind, RunOptions, SessionId, UserInput, build_engine,
     },
     memory::{Message, Session, Store},
-    providers::{ChatTransport, ModelInfo, ProviderConfig, build_transport},
+    providers::{ChatTransport, ModelInfo, ProviderConfig, ProviderKind, build_transport},
     tools::{Approval, ToolRegistry, ToolSpec, builtin::registry_with_notes},
 };
 
@@ -140,6 +140,26 @@ struct ProviderView {
     #[serde(flatten)]
     config: ProviderConfig,
     has_api_key: bool,
+    /// Whether this provider's transport forwards tool calls.
+    ///
+    /// Surfaced so the UI can disable the tools toggle rather than offering
+    /// something the backend will discard.
+    supports_tools: bool,
+}
+
+/// Whether a provider kind can carry tools, without building a transport.
+///
+/// `build_transport` needs a credential, and the provider list is rendered
+/// before any key is resolved.
+fn kind_supports_tools(kind: ProviderKind) -> bool {
+    match kind {
+        // Anthropic encodes tools as content blocks; not mapped yet.
+        ProviderKind::Anthropic => false,
+        ProviderKind::OpenAi
+        | ProviderKind::DeepSeek
+        | ProviderKind::OpenAiCompatible
+        | ProviderKind::Gemini => true,
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -224,6 +244,7 @@ fn list_providers(app: AppHandle) -> Result<Vec<ProviderView>, String> {
                 .and_then(|key_ref| secrets::get(key_ref).ok().flatten())
                 .is_some();
             ProviderView {
+                supports_tools: kind_supports_tools(config.kind),
                 config,
                 has_api_key,
             }
@@ -285,6 +306,7 @@ fn save_provider(
     state.invalidate_engines(&config.id);
 
     Ok(ProviderView {
+        supports_tools: kind_supports_tools(config.kind),
         config,
         has_api_key,
     })
@@ -520,8 +542,25 @@ fn get_messages(state: State<'_, AppState>, session_id: String) -> Result<Vec<Me
 /// table". The schemas share no lineage, so they get separate files.
 const DB_FILE: &str = "workspace.sqlite3";
 
+/// Send `tracing` output to stderr.
+///
+/// Without this every `warn!` in `core` is discarded — which is how a
+/// "this provider cannot forward tools" warning went unseen while the UI
+/// showed tools as enabled.
+fn init_tracing() {
+    use tracing_subscriber::{EnvFilter, fmt};
+
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("essentio_core=info,essentio_app_lib=info,warn"));
+
+    // A second init would fail; ignore it so tests and repeated calls are safe.
+    let _ = fmt().with_env_filter(filter).with_target(true).try_init();
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    init_tracing();
+
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {

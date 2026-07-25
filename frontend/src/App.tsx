@@ -101,6 +101,14 @@ export default function App() {
     [providers, providerId],
   );
 
+  /**
+   * Whether tools can actually run right now.
+   *
+   * ADK does not forward tool calls, and some transports cannot encode them,
+   * so the toggle has to reflect both.
+   */
+  const toolsUsable = Boolean(activeProvider?.supportsTools) && engine === "direct";
+
   const refreshProviders = useCallback(async () => {
     try {
       const loaded = await listProviders();
@@ -297,7 +305,13 @@ export default function App() {
           prompt,
           temperature: 0.7,
           engine,
-          toolIds: toolsEnabled ? tools.map((tool) => tool.name) : [],
+          toolIds:
+            toolsEnabled && toolsUsable ? tools.map((tool) => tool.name) : [],
+          // Models will not reach for a tool they were not told they have.
+          systemPrompt:
+            toolsEnabled && toolsUsable
+              ? "You have tools available. Use them whenever the answer depends on live data, the user's files, or anything you cannot know on your own."
+              : undefined,
         },
         (event: EngineEvent) => {
           switch (event.type) {
@@ -366,7 +380,16 @@ export default function App() {
         },
       );
     },
-    [providerId, model, engine, tools, toolsEnabled, refreshSessions, loadTurns],
+    [
+      providerId,
+      model,
+      engine,
+      tools,
+      toolsEnabled,
+      toolsUsable,
+      refreshSessions,
+      loadTurns,
+    ],
   );
 
   const send = useCallback(async () => {
@@ -605,17 +628,30 @@ export default function App() {
             </label>
 
             {tools.length > 0 && (
-              <label className="field field--check" title={toolNames(tools)}>
+              <label
+                className="field field--check"
+                title={
+                  toolsUsable
+                    ? toolNames(tools)
+                    : `${activeProvider?.label ?? "This provider"} cannot use tools yet`
+                }
+              >
                 <span className="field__label">Tools</span>
-                <span className="check">
+                <span className={`check ${toolsUsable ? "" : "check--off"}`}>
                   <input
                     type="checkbox"
-                    checked={toolsEnabled}
-                    disabled={isStreaming}
+                    checked={toolsEnabled && toolsUsable}
+                    // Offering a toggle the backend would discard is worse
+                    // than not offering one.
+                    disabled={isStreaming || !toolsUsable}
                     onChange={(event) => setToolsEnabled(event.target.checked)}
                   />
                   <span className="check__text">
-                    {toolsEnabled ? `${tools.length} on` : "off"}
+                    {!toolsUsable
+                      ? "unsupported"
+                      : toolsEnabled
+                        ? `${tools.length} on`
+                        : "off"}
                   </span>
                 </span>
               </label>

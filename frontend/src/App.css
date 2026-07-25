@@ -781,6 +781,15 @@ textarea {
   cursor: pointer;
 }
 
+.check--off {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.check--off input {
+  cursor: not-allowed;
+}
+
 .check__text {
   font-size: var(--text-sm);
   color: var(--text-muted);
