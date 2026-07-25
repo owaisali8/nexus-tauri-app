@@ -7,8 +7,8 @@ endpoint) or cloud providers, with conversations stored on your machine.
 
 ## Status
 
-Chat, persistence, provider management, tool calling and MCP work end to end.
-RAG and deep research are not built yet.
+Chat, persistence, provider management, tool calling, MCP and document search
+work end to end. Deep research and the documents editor are not built.
 
 "Verified live" below means exercised against the real service or a real
 server, not merely unit-tested.
@@ -26,8 +26,27 @@ server, not merely unit-tested.
 | Tool calling + approval gate | verified live |
 | Built-in tools (`current_time`, `write_note`) | verified live |
 | MCP servers | verified live, incl. through chat |
+| Document search (RAG) | verified live, local embeddings |
 | Tools on the ADK engine | not wired — Direct only |
-| RAG / deep research / documents | not started |
+| Deep research / documents editor / compare | not started |
+
+## Document search
+
+Text files are chunked, embedded and stored in the same SQLite database as
+everything else, then compared by brute-force cosine. LanceDB — the original
+plan — took the dependency tree from 753 to 2157 crates for a corpus that will
+hold thousands of chunks, not millions. Past roughly 100k chunks this wants a
+real index; `Retriever` is narrow enough to swap then.
+
+Retrieval is a tool the model calls, not context injected into every message,
+so a conversation that has nothing to do with your files does not pay for a
+search.
+
+Embedding similarity has a high floor — measured against `nomic-embed-text`,
+unrelated text still scores 0.41–0.51 where genuinely relevant passages score
+0.64–0.71. An absolute cutoff therefore cannot separate the two. Weak matches
+are returned but flagged, so the model can say your documents do not cover
+something rather than citing the closest paragraph as though they did.
 
 ## Tools and approval
 
@@ -128,6 +147,12 @@ run:
 
 ```bash
 cargo run -p essentio-core --example mcp_smoke        # real MCP server round trip
+```
+
+RAG needs an embedding model loaded in LM Studio:
+
+```bash
+cargo run -p essentio-core --example rag_smoke        # ingest, retrieve, rank
 ```
 
 ## Data locations
