@@ -26,6 +26,7 @@ import {
 } from "./features/chat/MessageList";
 import { ProviderSettings } from "./features/settings/ProviderSettings";
 import { McpSettings } from "./features/tools/McpSettings";
+import { DocumentSettings } from "./features/documents/DocumentSettings";
 import { WindowControls } from "./WindowControls";
 import "./App.css";
 
@@ -84,6 +85,7 @@ export default function App() {
 
   const [showSettings, setShowSettings] = useState(false);
   const [showMcp, setShowMcp] = useState(false);
+  const [showDocuments, setShowDocuments] = useState(false);
   const [tools, setTools] = useState<ToolSpec[]>([]);
   const [toolsEnabled, setToolsEnabled] = useState(false);
 
@@ -709,6 +711,13 @@ export default function App() {
               >
                 MCP
               </button>
+              <button
+                type="button"
+                className="button button--ghost"
+                onClick={() => setShowDocuments(true)}
+              >
+                Docs
+              </button>
             </div>
           </div>
 
@@ -802,6 +811,14 @@ export default function App() {
         <McpSettings
           onClose={() => setShowMcp(false)}
           // Connecting a server changes the tool list.
+          onChanged={() => void refreshTools()}
+        />
+      )}
+
+      {showDocuments && (
+        <DocumentSettings
+          onClose={() => setShowDocuments(false)}
+          // Enabling embeddings adds search_documents to the registry.
           onChanged={() => void refreshTools()}
         />
       )}

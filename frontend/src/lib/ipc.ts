@@ -94,6 +94,50 @@ export function reconnectMcp(): Promise<string[]> {
   return invoke("reconnect_mcp");
 }
 
+export type EmbeddingConfig = {
+  providerId: string;
+  model: string;
+};
+
+export type IngestedDocument = {
+  id: string;
+  title: string;
+  source: string;
+  mimeType: string;
+  byteCount: number;
+  createdAt: number;
+  chunkCount: number;
+};
+
+export function getEmbeddingConfig(): Promise<EmbeddingConfig | null> {
+  return invoke("get_embedding_config");
+}
+
+/** Pass `null` to turn document search off. */
+export function setEmbeddingConfig(
+  config: EmbeddingConfig | null,
+): Promise<void> {
+  return invoke("set_embedding_config", { config });
+}
+
+export function listDocuments(): Promise<IngestedDocument[]> {
+  return invoke("list_documents");
+}
+
+/** Chunk, embed and index a document. Resolves with the chunk count. */
+export function ingestDocument(request: {
+  title: string;
+  source: string;
+  mimeType?: string;
+  text: string;
+}): Promise<number> {
+  return invoke("ingest_document", { request });
+}
+
+export function deleteDocument(documentId: string): Promise<boolean> {
+  return invoke("delete_document", { documentId });
+}
+
 /**
  * Answer a pending approval prompt.
  *

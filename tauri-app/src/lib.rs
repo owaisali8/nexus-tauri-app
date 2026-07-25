@@ -19,6 +19,7 @@ use essentio_core::{
     },
     memory::{Message, Session, Store},
     providers::{ChatTransport, ModelInfo, ProviderConfig, ProviderKind, build_transport},
+    rag::{Document, Retriever, embed::OpenAiCompatEmbedder, tool::SearchDocuments},
     tools::{
         Approval, ToolRegistry, ToolSpec,
         builtin::registry_with_notes,
@@ -83,6 +84,9 @@ struct AppState {
     mcp: Mutex<Arc<McpManager>>,
     /// Servers that failed to start, surfaced to the UI rather than only logged.
     mcp_failures: Mutex<Vec<String>>,
+    /// `None` until an embedding model is chosen; document search is
+    /// unavailable rather than silently broken until then.
+    retriever: Mutex<Option<Arc<Retriever>>>,
     /// Shared by every engine; prompts are routed by run id, which is why
     /// caching engines across conversations stays safe.
     approvals: Arc<ApprovalRouter>,
@@ -99,6 +103,7 @@ impl AppState {
             builtin_tools,
             mcp: Mutex::new(Arc::new(McpManager::new())),
             mcp_failures: Mutex::new(Vec::new()),
+            retriever: Mutex::new(None),
             approvals: Arc::new(ApprovalRouter::new()),
         }
     }
@@ -111,23 +116,40 @@ impl AppState {
             .clone())
     }
 
-    /// Reconnect every configured MCP server and rebuild the tool registry.
+    /// Rebuild the tool registry from built-ins plus whatever is connected.
     ///
+    /// Single place so MCP and RAG cannot each clobber the other's tools.
     /// Engines are dropped afterwards because each holds a snapshot of the
     /// registry taken when it was built.
+    fn rebuild_tools(&self) -> Result<(), String> {
+        let mut registry = self.builtin_tools.clone();
+
+        if let Ok(manager) = self.mcp.lock() {
+            manager.register_into(&mut registry);
+        }
+
+        if let Ok(retriever) = self.retriever.lock()
+            && let Some(retriever) = retriever.as_ref()
+        {
+            registry.register(Arc::new(SearchDocuments::new(retriever.clone())));
+        }
+
+        *self
+            .tools
+            .lock()
+            .map_err(|_| "tool registry poisoned".to_string())? = registry;
+
+        if let Ok(mut engines) = self.engines.lock() {
+            engines.clear();
+        }
+
+        Ok(())
+    }
+
+    /// Reconnect every configured MCP server.
     async fn reload_mcp(&self, configs: &[McpServerConfig]) -> Result<Vec<String>, String> {
         let (manager, failures) = McpManager::connect_all(configs).await;
 
-        let mut registry = self.builtin_tools.clone();
-        manager.register_into(&mut registry);
-
-        {
-            let mut slot = self
-                .tools
-                .lock()
-                .map_err(|_| "tool registry poisoned".to_string())?;
-            *slot = registry;
-        }
         {
             let mut slot = self
                 .mcp
@@ -140,11 +162,39 @@ impl AppState {
         if let Ok(mut slot) = self.mcp_failures.lock() {
             slot.clone_from(&failures);
         }
-        if let Ok(mut engines) = self.engines.lock() {
-            engines.clear();
-        }
 
+        self.rebuild_tools()?;
         Ok(failures)
+    }
+
+    /// Point the retriever at an embedding model, or clear it.
+    ///
+    /// Embeddings from different models are not comparable, so changing the
+    /// model leaves previously indexed documents unsearchable until they are
+    /// added again. Retrieval filters on the model name, so those rows are
+    /// inert rather than returning nonsense.
+    fn set_embedder(
+        &self,
+        provider: Option<(&ProviderConfig, Option<String>, &str)>,
+    ) -> Result<(), String> {
+        let built = match provider {
+            Some((config, api_key, model)) => {
+                let embedder = OpenAiCompatEmbedder::new(config, api_key, model)
+                    .map_err(|error| error.to_string())?;
+                Some(Arc::new(Retriever::new(
+                    self.store.clone(),
+                    Arc::new(embedder),
+                )))
+            }
+            None => None,
+        };
+
+        *self
+            .retriever
+            .lock()
+            .map_err(|_| "retriever lock poisoned".to_string())? = built;
+
+        self.rebuild_tools()
     }
 
     fn engine(
@@ -483,6 +533,122 @@ fn list_tools(state: State<'_, AppState>) -> Result<Vec<ToolSpec>, String> {
     Ok(state.tool_registry()?.specs())
 }
 
+/// Settings keys for the embedding model.
+const EMBED_PROVIDER_KEY: &str = "embedding.provider_id";
+const EMBED_MODEL_KEY: &str = "embedding.model";
+
+/// Which provider and model produce embeddings.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct EmbeddingConfig {
+    provider_id: String,
+    model: String,
+}
+
+fn load_embedding_config(state: &AppState) -> Option<EmbeddingConfig> {
+    let provider_id = state.store.get_setting(EMBED_PROVIDER_KEY).ok().flatten()?;
+    let model = state.store.get_setting(EMBED_MODEL_KEY).ok().flatten()?;
+    Some(EmbeddingConfig { provider_id, model })
+}
+
+#[tauri::command]
+fn get_embedding_config(state: State<'_, AppState>) -> Option<EmbeddingConfig> {
+    load_embedding_config(&state)
+}
+
+/// Choose the embedding model, or pass `null` to turn document search off.
+#[tauri::command]
+fn set_embedding_config(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    config: Option<EmbeddingConfig>,
+) -> Result<(), String> {
+    let Some(config) = config else {
+        state.set_embedder(None)?;
+        state
+            .store
+            .set_setting(EMBED_PROVIDER_KEY, "")
+            .map_err(|e| e.to_string())?;
+        return Ok(());
+    };
+
+    let provider = find_provider(&app, &config.provider_id)?;
+    let api_key = api_key_for(&provider)?;
+    state.set_embedder(Some((&provider, api_key, &config.model)))?;
+
+    state
+        .store
+        .set_setting(EMBED_PROVIDER_KEY, &config.provider_id)
+        .map_err(|e| e.to_string())?;
+    state
+        .store
+        .set_setting(EMBED_MODEL_KEY, &config.model)
+        .map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+#[tauri::command]
+fn list_documents(state: State<'_, AppState>) -> Result<Vec<Document>, String> {
+    state.store.list_documents().map_err(|e| e.to_string())
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct IngestRequest {
+    title: String,
+    /// Identifies the document; re-ingesting the same source replaces it.
+    source: String,
+    #[serde(default)]
+    mime_type: Option<String>,
+    text: String,
+}
+
+/// Chunk, embed and index a document.
+///
+/// The frontend reads the file and sends its text, so this handles pasted
+/// content and dropped files through one path and never opens a file the user
+/// did not choose.
+#[tauri::command]
+async fn ingest_document(
+    state: State<'_, AppState>,
+    request: IngestRequest,
+) -> Result<usize, String> {
+    let retriever = {
+        let slot = state
+            .retriever
+            .lock()
+            .map_err(|_| "retriever lock poisoned".to_string())?;
+        slot.clone()
+    };
+
+    let retriever = retriever.ok_or_else(|| {
+        "No embedding model is configured. Choose one in Documents before indexing.".to_string()
+    })?;
+
+    if request.text.trim().is_empty() {
+        return Err("The document is empty.".to_string());
+    }
+
+    retriever
+        .ingest(
+            &request.title,
+            &request.source,
+            request.mime_type.as_deref().unwrap_or("text/plain"),
+            &request.text,
+        )
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn delete_document(state: State<'_, AppState>, document_id: String) -> Result<bool, String> {
+    state
+        .store
+        .delete_document(&document_id)
+        .map_err(|e| e.to_string())
+}
+
 fn load_mcp_servers(app: &AppHandle) -> Result<Vec<McpServerConfig>, String> {
     let path = app_data_dir(app)?.join(MCP_FILE);
     if !path.exists() {
@@ -768,6 +934,25 @@ pub fn run() {
             // Connect MCP servers in the background: each one is a process
             // launch and a handshake, and the window should not wait on a
             // server that may be slow or broken.
+            // Restore a previously chosen embedding model, so indexed
+            // documents stay searchable across restarts.
+            {
+                let state = app.state::<AppState>();
+                if let Some(config) = load_embedding_config(&state) {
+                    match find_provider(app.handle(), &config.provider_id).and_then(|provider| {
+                        let api_key = api_key_for(&provider)?;
+                        state.set_embedder(Some((&provider, api_key, &config.model)))
+                    }) {
+                        Ok(()) => tracing::info!(model = %config.model, "embedding model restored"),
+                        // A provider removed since last run should not stop
+                        // the app; document search is simply unavailable.
+                        Err(error) => {
+                            tracing::warn!(%error, "could not restore the embedding model")
+                        }
+                    }
+                }
+            }
+
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 let servers = match load_mcp_servers(&handle) {
@@ -813,7 +998,12 @@ pub fn run() {
             list_mcp_servers,
             save_mcp_server,
             delete_mcp_server,
-            reconnect_mcp
+            reconnect_mcp,
+            get_embedding_config,
+            set_embedding_config,
+            list_documents,
+            ingest_document,
+            delete_document
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
