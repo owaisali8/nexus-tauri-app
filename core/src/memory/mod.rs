@@ -15,7 +15,10 @@ use serde::{Deserialize, Serialize};
 use crate::{Error, Result, engine::EngineKind, providers::openai_compat::ChatMessage};
 
 /// Ordered migrations. Append only; never edit one that has shipped.
-const MIGRATIONS: &[(i64, &str)] = &[(1, include_str!("../../db/migrations/0001_sessions.sql"))];
+const MIGRATIONS: &[(i64, &str)] = &[
+    (1, include_str!("../../db/migrations/0001_sessions.sql")),
+    (2, include_str!("../../db/migrations/0002_documents.sql")),
+];
 
 /// Tables every migrated database must have.
 ///
@@ -24,7 +27,7 @@ const MIGRATIONS: &[(i64, &str)] = &[(1, include_str!("../../db/migrations/0001_
 /// same version numbers, causing migrations to be skipped and leaving the
 /// tables absent. Failing here with a clear message beats failing later with
 /// "no such table" from whatever query happens to run first.
-const EXPECTED_TABLES: &[&str] = &["sessions", "messages", "settings"];
+const EXPECTED_TABLES: &[&str] = &["sessions", "messages", "settings", "documents", "chunks"];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -406,6 +409,149 @@ impl Store {
                 .map_err(db_error)?;
 
             Ok(removed)
+        })
+    }
+
+    // ---- documents and chunks ----
+
+    /// Store a document and its embedded chunks in one transaction.
+    ///
+    /// All-or-nothing: a partially indexed document would return passages
+    /// with gaps and no way to tell that had happened.
+    pub fn insert_document(
+        &self,
+        document: &crate::rag::Document,
+        chunks: &[crate::rag::chunk::Chunk],
+        embeddings: &[Vec<f32>],
+        model: &str,
+    ) -> Result<()> {
+        self.with_connection(|connection| {
+            let transaction = connection.unchecked_transaction().map_err(db_error)?;
+
+            transaction
+                .execute(
+                    "INSERT INTO documents (id, title, source, mime_type, byte_count, created_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    params![
+                        document.id,
+                        document.title,
+                        document.source,
+                        document.mime_type,
+                        document.byte_count,
+                        now(),
+                    ],
+                )
+                .map_err(db_error)?;
+
+            for (chunk, embedding) in chunks.iter().zip(embeddings) {
+                transaction
+                    .execute(
+                        "INSERT INTO chunks
+                           (id, document_id, seq, text, offset, embedding, model, dimensions)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                        params![
+                            uuid::Uuid::new_v4().to_string(),
+                            document.id,
+                            chunk.index as i64,
+                            chunk.text,
+                            chunk.offset as i64,
+                            crate::rag::encode_embedding(embedding),
+                            model,
+                            embedding.len() as i64,
+                        ],
+                    )
+                    .map_err(db_error)?;
+            }
+
+            transaction.commit().map_err(db_error)
+        })
+    }
+
+    pub fn list_documents(&self) -> Result<Vec<crate::rag::Document>> {
+        self.with_connection(|connection| {
+            let mut statement = connection
+                .prepare(
+                    "SELECT d.id, d.title, d.source, d.mime_type, d.byte_count, d.created_at,
+                            COUNT(c.id)
+                     FROM documents d
+                     LEFT JOIN chunks c ON c.document_id = d.id
+                     GROUP BY d.id
+                     ORDER BY d.created_at DESC",
+                )
+                .map_err(db_error)?;
+
+            let rows = statement
+                .query_map([], |row| {
+                    Ok(crate::rag::Document {
+                        id: row.get(0)?,
+                        title: row.get(1)?,
+                        source: row.get(2)?,
+                        mime_type: row.get(3)?,
+                        byte_count: row.get(4)?,
+                        created_at: row.get(5)?,
+                        chunk_count: row.get(6)?,
+                    })
+                })
+                .map_err(db_error)?;
+
+            rows.collect::<rusqlite::Result<Vec<_>>>().map_err(db_error)
+        })
+    }
+
+    /// Remove a document and its chunks. Returns whether anything matched.
+    pub fn delete_document(&self, document_id: &str) -> Result<bool> {
+        self.with_connection(|connection| {
+            let removed = connection
+                .execute("DELETE FROM documents WHERE id = ?1", params![document_id])
+                .map_err(db_error)?;
+            Ok(removed > 0)
+        })
+    }
+
+    /// Remove whatever was previously ingested from `source`.
+    ///
+    /// Re-ingesting a changed file would otherwise leave the old chunks in
+    /// place, competing with the new ones for the same queries.
+    pub fn delete_document_by_source(&self, source: &str) -> Result<bool> {
+        self.with_connection(|connection| {
+            let removed = connection
+                .execute("DELETE FROM documents WHERE source = ?1", params![source])
+                .map_err(db_error)?;
+            Ok(removed > 0)
+        })
+    }
+
+    /// Every chunk embedded with `model`, for scoring.
+    ///
+    /// Filtering here rather than at compare time keeps vectors from a
+    /// different model out of the ranking entirely.
+    pub fn load_chunks_for_model(&self, model: &str) -> Result<Vec<crate::rag::StoredChunk>> {
+        self.with_connection(|connection| {
+            let mut statement = connection
+                .prepare(
+                    "SELECT c.document_id, d.title, d.source, c.text, c.seq, c.embedding
+                     FROM chunks c
+                     JOIN documents d ON d.id = c.document_id
+                     WHERE c.model = ?1
+                     ORDER BY c.document_id, c.seq",
+                )
+                .map_err(db_error)?;
+
+            let rows = statement
+                .query_map(params![model], |row| {
+                    let bytes: Vec<u8> = row.get(5)?;
+                    Ok(crate::rag::StoredChunk {
+                        document_id: row.get(0)?,
+                        document_title: row.get(1)?,
+                        source: row.get(2)?,
+                        text: row.get(3)?,
+                        seq: row.get(4)?,
+                        embedding: crate::rag::decode_embedding(&bytes),
+                    })
+                })
+                .map_err(db_error)?;
+
+            rows.collect::<rusqlite::Result<Vec<_>>>().map_err(db_error)
         })
     }
 
