@@ -86,6 +86,29 @@ impl McpServerConfig {
     }
 }
 
+/// Resolve a command name to a full path.
+///
+/// `Command::new("npx")` fails on Windows: npm installs `npx.cmd` and
+/// `npx.ps1` shims rather than an `.exe`, and Rust's PATH search only appends
+/// `.exe`. The `which` crate honours `PATHEXT`, so it finds the shim that
+/// CreateProcess can actually run. Since most MCP servers are launched with
+/// `npx`, without this nearly every server fails on Windows with an unhelpful
+/// "program not found".
+fn resolve_program(command: &str) -> Result<std::path::PathBuf> {
+    // An explicit path is used as given; the user meant that exact file.
+    let candidate = std::path::Path::new(command);
+    if candidate.is_absolute() || command.contains('/') || command.contains('\\') {
+        return Ok(candidate.to_path_buf());
+    }
+
+    which::which(command).map_err(|error| {
+        Error::Invalid(format!(
+            "`{command}` was not found on PATH ({error}). \
+             Install it, or give the full path to the executable."
+        ))
+    })
+}
+
 /// Namespaced tool name, e.g. `filesystem__read_file`.
 pub fn namespaced(server_id: &str, tool_name: &str) -> String {
     format!("{server_id}{NAMESPACE_SEPARATOR}{tool_name}")
@@ -110,7 +133,9 @@ impl McpConnection {
     pub async fn connect(config: &McpServerConfig) -> Result<Self> {
         config.validate()?;
 
-        let mut command = tokio::process::Command::new(&config.command);
+        let program = resolve_program(&config.command)?;
+
+        let mut command = tokio::process::Command::new(&program);
         command.args(&config.args);
         for (key, value) in &config.env {
             command.env(key, value);
@@ -119,7 +144,8 @@ impl McpConnection {
         let transport = TokioChildProcess::new(command).map_err(|error| {
             Error::Transport(format!(
                 "could not start MCP server `{}` ({}): {error}",
-                config.id, config.command
+                config.id,
+                program.display()
             ))
         })?;
 
@@ -364,6 +390,44 @@ mod tests {
     fn text_blocks_are_flattened_in_order() {
         let blocks = vec![ContentBlock::text("first"), ContentBlock::text("second")];
         assert_eq!(flatten_content(&blocks), "first\nsecond");
+    }
+
+    /// Regression: `npx` is a `.cmd`/`.ps1` shim on Windows, and Rust's PATH
+    /// search only appends `.exe`. Without PATHEXT-aware resolution nearly
+    /// every MCP server fails to launch.
+    #[test]
+    fn a_shim_on_path_resolves_to_a_runnable_file() {
+        // Pick something guaranteed present on each platform.
+        #[cfg(windows)]
+        let program = "cmd";
+        #[cfg(not(windows))]
+        let program = "sh";
+
+        let resolved = resolve_program(program).unwrap();
+        assert!(
+            resolved.is_absolute(),
+            "expected an absolute path, got {}",
+            resolved.display()
+        );
+    }
+
+    #[test]
+    fn a_missing_program_says_so_plainly() {
+        let error = resolve_program("definitely-not-real-xyz")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("not found on PATH"), "got {error}");
+    }
+
+    #[test]
+    fn an_explicit_path_is_left_alone() {
+        // A user-supplied path must not be re-resolved against PATH.
+        #[cfg(windows)]
+        let path = r"C:\tools\my-server.exe";
+        #[cfg(not(windows))]
+        let path = "/usr/local/bin/my-server";
+
+        assert_eq!(resolve_program(path).unwrap(), std::path::Path::new(path));
     }
 
     #[tokio::test]
