@@ -23,6 +23,7 @@ server, not merely unit-tested.
 | Conversation persistence | verified, survives restart |
 | Markdown + syntax highlighting | works |
 | Regenerate, edit-and-resend | works |
+| Agents (named instruction + model + tool profiles) | verified live |
 | Tool calling + approval gate | verified live |
 | Built-in tools (`current_time`, `write_note`) | verified live |
 | MCP servers | verified live, incl. through chat |
@@ -47,6 +48,16 @@ unrelated text still scores 0.41–0.51 where genuinely relevant passages score
 0.64–0.71. An absolute cutoff therefore cannot separate the two. Weak matches
 are returned but flagged, so the model can say your documents do not cover
 something rather than citing the closest paragraph as though they did.
+
+## Agents
+
+An agent is a saved profile: system instructions, provider, model,
+temperature, and which tools it may use. A conversation either belongs to an
+agent or is plain chat, which stays a first-class path rather than a stripped
+down agent.
+
+Deleting an agent leaves its conversations intact and unattached. They are
+the user's, not the profile's.
 
 ## Tools and approval
 
