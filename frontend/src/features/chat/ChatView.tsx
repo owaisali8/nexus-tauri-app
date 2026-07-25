@@ -135,18 +135,20 @@ export function ChatView({
     }
   }, []);
 
-  // Switching conversations cancels whatever the previous one was doing.
+  // Load the transcript once, on mount.
+  //
+  // Not keyed on `session`: it goes from null to a row on the first send of a
+  // new chat, and reacting to that would wipe the messages just streamed in.
+  // The parent remounts this component when the user switches conversation,
+  // which is the only time a reload is wanted.
   useEffect(() => {
-    cancelRef.current?.();
-    cancelRef.current = null;
-    setIsStreaming(false);
-    setUsage(null);
-    setTurns([]);
+    const openId = session?.id;
+    if (openId) void loadTurns(openId);
 
-    if (session) void loadTurns(session.id);
-  }, [session, loadTurns]);
-
-  useEffect(() => () => cancelRef.current?.(), []);
+    // Cancel whatever is in flight when this conversation goes away.
+    return () => cancelRef.current?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const startRun = useCallback(
     (sessionId: string, prompt: string) => {

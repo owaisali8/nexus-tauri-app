@@ -50,11 +50,26 @@ textarea {
 
 /* ---- Chat pane ---- */
 
+/* Flex rather than fixed grid rows: the picker row only renders for plain
+   chat, and positional rows would give the free space to the composer
+   whenever a child is absent. */
 .chat {
-  display: grid;
-  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  display: flex;
+  flex-direction: column;
   min-height: 0;
   min-width: 0;
+}
+
+/* Both the empty state and the virtualized list carry this class. */
+.chat > .messages {
+  flex: 1;
+  min-height: 0;
+}
+
+.chat__header,
+.chat__pickers,
+.composer {
+  flex: 0 0 auto;
 }
 
 .chat__header {

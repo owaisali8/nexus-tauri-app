@@ -42,6 +42,15 @@ export default function App() {
   /** Agent for a new chat that has no session row yet. */
   const [pendingAgent, setPendingAgent] = useState<Agent | null>(null);
 
+  /**
+   * Identity of the open conversation for remount purposes.
+   *
+   * Deliberately not the session id: a new chat gets its session row on the
+   * first send, and keying on the id would remount the pane mid-stream,
+   * discarding the run and the messages with it.
+   */
+  const [chatKey, setChatKey] = useState<string>(() => crypto.randomUUID());
+
   const [settingsPane, setSettingsPane] = useState<
     "providers" | "mcp" | "documents" | null
   >(null);
@@ -123,23 +132,30 @@ export default function App() {
   const startNewChat = useCallback((agent: Agent | null) => {
     setSession(null);
     setPendingAgent(agent);
+    setChatKey(crypto.randomUUID());
     setSection("chats");
+  }, []);
+
+  const openSession = useCallback((target: Session) => {
+    setSession(target);
+    setPendingAgent(null);
+    setChatKey(target.id);
   }, []);
 
   const removeSession = useCallback(
     async (target: Session) => {
       try {
         await deleteSession(target.id);
-        if (session?.id === target.id) {
-          setSession(null);
-          setPendingAgent(null);
-        }
+        // Deleting the open conversation drops back to a fresh one; the key
+        // changes so the pane resets rather than showing the deleted
+        // transcript.
+        if (session?.id === target.id) startNewChat(null);
         await refreshSessions();
       } catch (error: unknown) {
         console.error("failed to delete session", error);
       }
     },
-    [session, refreshSessions],
+    [session, refreshSessions, startNewChat],
   );
 
   return (
@@ -199,10 +215,7 @@ export default function App() {
                       <button
                         type="button"
                         className="session__open"
-                        onClick={() => {
-                          setSession(item);
-                          setPendingAgent(null);
-                        }}
+                        onClick={() => openSession(item)}
                         onDoubleClick={() => {
                           const next = window.prompt("Rename chat", item.title);
                           if (next?.trim()) {
@@ -270,9 +283,9 @@ export default function App() {
         <div className="main">
           {section === "chats" ? (
             <ChatView
-              // Remount on conversation change so per-chat state cannot leak
-              // between them.
-              key={session?.id ?? `new-${activeAgent?.id ?? "plain"}`}
+              // Remount only when the user switches conversation, never when
+              // the current one acquires its session row.
+              key={chatKey}
               session={session}
               agent={activeAgent}
               providers={providers}
