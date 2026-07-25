@@ -12,11 +12,18 @@ import {
   listModels,
   listProviders,
   listSessions,
+  listTools,
   renameSession,
+  respondToApproval,
   runStream,
   truncateSession,
+  type ToolSpec,
 } from "./lib/ipc";
-import { MessageList, type Turn } from "./features/chat/MessageList";
+import {
+  MessageList,
+  type ToolActivity,
+  type Turn,
+} from "./features/chat/MessageList";
 import { ProviderSettings } from "./features/settings/ProviderSettings";
 import { WindowControls } from "./WindowControls";
 import "./App.css";
@@ -37,6 +44,26 @@ function deriveTitle(text: string) {
   return firstLine.length > 48 ? `${firstLine.slice(0, 48)}…` : firstLine;
 }
 
+/**
+ * Whether a failed tool result came from the user declining it.
+ *
+ * The engine reports a denial as an ordinary failure so the model can react;
+ * the UI wants to say "declined" rather than "failed".
+ */
+function isDenial(output: unknown) {
+  return (
+    typeof output === "object" &&
+    output !== null &&
+    "error" in output &&
+    typeof output.error === "string" &&
+    output.error.includes("declined")
+  );
+}
+
+function toolNames(tools: ToolSpec[]) {
+  return tools.map((tool) => tool.name).join(", ");
+}
+
 function formatWhen(unixSeconds: number) {
   const date = new Date(unixSeconds * 1000);
   const sameDay = new Date().toDateString() === date.toDateString();
@@ -55,6 +82,11 @@ export default function App() {
   });
 
   const [showSettings, setShowSettings] = useState(false);
+  const [tools, setTools] = useState<ToolSpec[]>([]);
+  const [toolsEnabled, setToolsEnabled] = useState(false);
+
+  /** Run id of the in-flight run, needed to answer its approval prompts. */
+  const activeRunRef = useRef<string>("");
   const [sessions, setSessions] = useState<Session[]>([]);
   const [activeSessionId, setActiveSessionId] = useState("");
   const [turns, setTurns] = useState<Turn[]>([]);
@@ -96,6 +128,9 @@ export default function App() {
   useEffect(() => {
     void refreshProviders();
     void refreshSessions();
+    listTools()
+      .then(setTools)
+      .catch((error: unknown) => console.error("failed to load tools", error));
   }, [refreshProviders, refreshSessions]);
 
   const testConnection = useCallback(async (id: string) => {
@@ -224,14 +259,45 @@ export default function App() {
         void refreshSessions();
       };
 
+      /** Add or update one tool card on the streaming assistant turn. */
+      const upsertTool = (
+        callId: string,
+        patch: Partial<ToolActivity> & Pick<ToolActivity, "name" | "args">,
+      ) =>
+        setTurns((current) =>
+          current.map((turn) => {
+            if (turn.id !== assistantId) return turn;
+            const existing = turn.tools ?? [];
+            const index = existing.findIndex(
+              (activity) => activity.callId === callId,
+            );
+
+            if (index === -1) {
+              return {
+                ...turn,
+                tools: [...existing, { callId, status: "running", ...patch }],
+              };
+            }
+
+            const updated = [...existing];
+            updated[index] = { ...updated[index], ...patch };
+            return { ...turn, tools: updated };
+          }),
+        );
+
+      const runId = crypto.randomUUID();
+      activeRunRef.current = runId;
+
       cancelRef.current = runStream(
         {
+          runId,
           sessionId,
           providerId,
           model,
           prompt,
           temperature: 0.7,
           engine,
+          toolIds: toolsEnabled ? tools.map((tool) => tool.name) : [],
         },
         (event: EngineEvent) => {
           switch (event.type) {
@@ -242,6 +308,45 @@ export default function App() {
                     ? { ...turn, content: turn.content + event.text }
                     : turn,
                 ),
+              );
+              break;
+            case "tool_call":
+              upsertTool(event.id, {
+                name: event.name,
+                args: event.args,
+                status: "running",
+              });
+              break;
+            case "approval_request":
+              // The run is blocked here until the user answers.
+              upsertTool(event.id, {
+                name: event.name,
+                args: event.args,
+                status: "awaiting",
+              });
+              break;
+            case "tool_result":
+              setTurns((current) =>
+                current.map((turn) => {
+                  if (turn.id !== assistantId) return turn;
+                  return {
+                    ...turn,
+                    tools: (turn.tools ?? []).map((activity) =>
+                      activity.callId === event.id
+                        ? {
+                            ...activity,
+                            status: event.ok
+                              ? ("ok" as const)
+                              : // A refusal reads differently from a crash.
+                                isDenial(event.output)
+                                ? ("denied" as const)
+                                : ("failed" as const),
+                            output: event.output,
+                          }
+                        : activity,
+                    ),
+                  };
+                }),
               );
               break;
             case "done":
@@ -255,13 +360,13 @@ export default function App() {
               settle({ content: `⚠ ${event.message}` });
               break;
             default:
-              // tool_call / tool_result / citation land in Phase 2.
+              // citation lands with RAG.
               break;
           }
         },
       );
     },
-    [providerId, model, engine, refreshSessions, loadTurns],
+    [providerId, model, engine, tools, toolsEnabled, refreshSessions, loadTurns],
   );
 
   const send = useCallback(async () => {
@@ -357,6 +462,29 @@ export default function App() {
     },
     [isStreaming, activeSessionId, startRun],
   );
+
+  /** Answer a pending approval prompt for the in-flight run. */
+  const respondToPrompt = useCallback((callId: string, approved: boolean) => {
+    const runId = activeRunRef.current;
+    if (!runId) return;
+
+    // Reflect the decision immediately; the tool_result event will follow and
+    // replace this with the real outcome.
+    setTurns((current) =>
+      current.map((turn) => ({
+        ...turn,
+        tools: (turn.tools ?? []).map((activity) =>
+          activity.callId === callId
+            ? { ...activity, status: approved ? "running" : "denied" }
+            : activity,
+        ),
+      })),
+    );
+
+    void respondToApproval(runId, callId, approved).catch((error: unknown) =>
+      console.error("failed to answer approval", error),
+    );
+  }, []);
 
   const canSend = Boolean(input.trim() && !isStreaming && providerId && model);
 
@@ -476,6 +604,23 @@ export default function App() {
               </select>
             </label>
 
+            {tools.length > 0 && (
+              <label className="field field--check" title={toolNames(tools)}>
+                <span className="field__label">Tools</span>
+                <span className="check">
+                  <input
+                    type="checkbox"
+                    checked={toolsEnabled}
+                    disabled={isStreaming}
+                    onChange={(event) => setToolsEnabled(event.target.checked)}
+                  />
+                  <span className="check__text">
+                    {toolsEnabled ? `${tools.length} on` : "off"}
+                  </span>
+                </span>
+              </label>
+            )}
+
             <div className="toolbar__status">
               {connection.status === "testing" && (
                 <span className="badge badge--muted">Connecting…</span>
@@ -536,6 +681,7 @@ export default function App() {
               isBusy={isStreaming}
               onRegenerate={() => void regenerate()}
               onEdit={(turn, next) => void editAndResend(turn, next)}
+              onRespond={respondToPrompt}
             />
           )}
 

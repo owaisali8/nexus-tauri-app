@@ -3,6 +3,7 @@
 //! Thin wrappers over `essentio_core`: command surface, the streaming bridge,
 //! and OS keychain access. Product logic belongs in `core`, not here.
 
+mod approval;
 mod secrets;
 
 use std::{
@@ -18,7 +19,10 @@ use essentio_core::{
     },
     memory::{Message, Session, Store},
     providers::{ChatTransport, ModelInfo, ProviderConfig, build_transport},
+    tools::{Approval, ToolRegistry, ToolSpec, builtin::registry_with_notes},
 };
+
+use approval::ApprovalRouter;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, State, ipc::Channel};
@@ -63,14 +67,20 @@ struct AppState {
     /// this is about avoiding rebuild cost — and for ADK, about keeping its
     /// hydrated session cache warm.
     engines: Mutex<HashMap<String, Arc<dyn AgentEngine>>>,
+    tools: ToolRegistry,
+    /// Shared by every engine; prompts are routed by run id, which is why
+    /// caching engines across conversations stays safe.
+    approvals: Arc<ApprovalRouter>,
 }
 
 impl AppState {
-    fn new(store: Store) -> Self {
+    fn new(store: Store, notes_dir: PathBuf) -> Self {
         Self {
             runs: Arc::new(RunRegistry::default()),
             store,
             engines: Mutex::new(HashMap::new()),
+            tools: registry_with_notes(notes_dir),
+            approvals: Arc::new(ApprovalRouter::new()),
         }
     }
 
@@ -88,7 +98,16 @@ impl AppState {
 
         Ok(engines
             .entry(cache_key)
-            .or_insert_with(|| build_engine(kind, provider.clone(), api_key, self.store.clone()))
+            .or_insert_with(|| {
+                build_engine(
+                    kind,
+                    provider.clone(),
+                    api_key,
+                    self.store.clone(),
+                    self.tools.clone(),
+                    self.approvals.clone(),
+                )
+            })
             .clone())
     }
 
@@ -139,6 +158,9 @@ struct RunStreamRequest {
     temperature: Option<f32>,
     #[serde(default)]
     engine: EngineKind,
+    /// Tools this run may use. Empty means none are offered to the model.
+    #[serde(default)]
+    tool_ids: Vec<String>,
 }
 
 fn app_data_dir(app: &AppHandle) -> Result<PathBuf, String> {
@@ -318,14 +340,16 @@ async fn run_stream(
         system_prompt,
         temperature,
         engine: engine_kind,
+        tool_ids,
     } = request;
 
     let provider = find_provider(&app, &provider_id)?;
     let engine = state.engine(engine_kind, &provider, api_key_for(&provider)?)?;
 
-    let mut opts = RunOptions::new(&provider_id, &model);
+    let mut opts = RunOptions::new(&provider_id, &model).with_run_id(&run_id);
     opts.temperature = temperature;
     opts.system_prompt = system_prompt;
+    opts.tool_ids = tool_ids;
 
     let stream = engine
         .run_stream(session_id.into(), UserInput::text(prompt), opts)
@@ -353,7 +377,35 @@ async fn run_stream(
 /// Abort an in-flight run. `false` means the run had already finished.
 #[tauri::command]
 fn cancel_run(state: State<'_, AppState>, run_id: String) -> bool {
+    // Deny anything the run left waiting first: a pending prompt answered
+    // after cancellation would otherwise still execute a tool.
+    state.approvals.abandon_run(&run_id);
     state.runs.abort(&run_id)
+}
+
+/// Tools available to a run.
+#[tauri::command]
+fn list_tools(state: State<'_, AppState>) -> Vec<ToolSpec> {
+    state.tools.specs()
+}
+
+/// Answer a pending approval prompt.
+///
+/// `false` means nothing was waiting — usually the run was cancelled or the
+/// prompt timed out.
+#[tauri::command]
+fn respond_to_approval(
+    state: State<'_, AppState>,
+    run_id: String,
+    call_id: String,
+    approved: bool,
+) -> bool {
+    let decision = if approved {
+        Approval::Approve
+    } else {
+        Approval::Deny
+    };
+    state.approvals.resolve(&run_id, &call_id, decision)
 }
 
 #[tauri::command]
@@ -475,9 +527,11 @@ pub fn run() {
         .setup(|app| {
             // The store needs the resolved app data dir, so it is built here
             // rather than in a Default impl.
-            let path = app_data_dir(app.handle())?.join(DB_FILE);
-            let store = Store::open(&path)?;
-            app.manage(AppState::new(store));
+            let data_dir = app_data_dir(app.handle())?;
+            let store = Store::open(&data_dir.join(DB_FILE))?;
+            // Notes are scoped to the app data dir; the tool refuses to write
+            // outside whatever root it is given.
+            app.manage(AppState::new(store, data_dir.join("notes")));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -492,7 +546,9 @@ pub fn run() {
             delete_session,
             rename_session,
             get_messages,
-            truncate_session
+            truncate_session,
+            list_tools,
+            respond_to_approval
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

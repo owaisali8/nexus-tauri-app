@@ -16,7 +16,7 @@ use crate::{
         ChatMessage, ChatRequest, ChatTransport, ProviderConfig, WireFunction, WireToolCall,
         build_transport,
     },
-    tools::{ApprovalGate, DenyAll, ToolCall, ToolRegistry},
+    tools::{ApprovalGate, DenyAll, Effect, RunContext, ToolCall, ToolRegistry},
 };
 
 /// Ceiling on tool round-trips within a single turn.
@@ -108,6 +108,7 @@ impl AgentEngine for DirectEngine {
         let key = session_id.0.clone();
         let model = opts.model.clone();
         let temperature = opts.temperature;
+        let context = RunContext::new(&session_id.0, &opts.run_id);
 
         let stream = async_stream::stream! {
             let mut messages = messages;
@@ -189,7 +190,17 @@ impl AgentEngine for DirectEngine {
                 ));
 
                 for call in &calls {
-                    let outcome = tools.invoke(call, gate.as_ref()).await;
+                    // Announce the prompt before blocking on it, so the UI can
+                    // show a card rather than appearing to hang.
+                    if tools.effect_of(&call.name) == Some(Effect::SideEffecting) {
+                        yield EngineEvent::ApprovalRequest {
+                            id: call.id.clone(),
+                            name: call.name.clone(),
+                            args: call.arguments.clone(),
+                        };
+                    }
+
+                    let outcome = tools.invoke(&context, call, gate.as_ref()).await;
 
                     yield EngineEvent::ToolResult {
                         id: outcome.id.clone(),
@@ -264,11 +275,14 @@ mod tests {
 
         let decision = engine
             .gate
-            .request(&ToolCall {
-                id: "call-1".to_string(),
-                name: "anything".to_string(),
-                arguments: serde_json::json!({}),
-            })
+            .request(
+                &RunContext::new("session-1", "run-1"),
+                &ToolCall {
+                    id: "call-1".to_string(),
+                    name: "anything".to_string(),
+                    arguments: serde_json::json!({}),
+                },
+            )
             .await;
 
         assert_eq!(decision, crate::tools::Approval::Deny);

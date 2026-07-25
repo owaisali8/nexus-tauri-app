@@ -2,6 +2,16 @@ import { useState } from "react";
 import { Virtuoso } from "react-virtuoso";
 import { Markdown } from "./Markdown";
 
+/** A tool call and, once it resolves, its outcome. */
+export type ToolActivity = {
+  callId: string;
+  name: string;
+  args: unknown;
+  /** `awaiting` means the run is blocked on the user. */
+  status: "running" | "awaiting" | "ok" | "failed" | "denied";
+  output?: unknown;
+};
+
 export type Turn = {
   id: string;
   role: "system" | "user" | "assistant";
@@ -9,7 +19,89 @@ export type Turn = {
   /** Position in the stored transcript; absent until the turn is persisted. */
   seq?: number;
   pending?: boolean;
+  /** Tool traffic that happened while producing this turn. */
+  tools?: ToolActivity[];
 };
+
+function formatArgs(args: unknown) {
+  if (args === null || args === undefined) return "";
+  const text = JSON.stringify(args, null, 2);
+  return text === "{}" ? "" : text;
+}
+
+function ToolCard({
+  activity,
+  onRespond,
+}: {
+  activity: ToolActivity;
+  onRespond: (callId: string, approved: boolean) => void;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const args = formatArgs(activity.args);
+
+  return (
+    <div className={`tool tool--${activity.status}`}>
+      <button
+        type="button"
+        className="tool__head"
+        onClick={() => setExpanded((open) => !open)}
+      >
+        <span className="tool__name">{activity.name}</span>
+        <span className="tool__status">
+          {activity.status === "running" && "running…"}
+          {activity.status === "awaiting" && "needs approval"}
+          {activity.status === "ok" && "done"}
+          {activity.status === "failed" && "failed"}
+          {activity.status === "denied" && "declined"}
+        </span>
+      </button>
+
+      {activity.status === "awaiting" && (
+        <div className="tool__approval">
+          <p className="tool__ask">
+            Allow <strong>{activity.name}</strong> to run?
+          </p>
+          {args && <pre className="tool__args">{args}</pre>}
+          <div className="tool__actions">
+            <button
+              type="button"
+              className="button button--ghost"
+              onClick={() => onRespond(activity.callId, false)}
+            >
+              Deny
+            </button>
+            <button
+              type="button"
+              className="button button--send"
+              onClick={() => onRespond(activity.callId, true)}
+            >
+              Allow
+            </button>
+          </div>
+        </div>
+      )}
+
+      {expanded && activity.status !== "awaiting" && (
+        <div className="tool__detail">
+          {args && (
+            <>
+              <span className="tool__label">arguments</span>
+              <pre className="tool__args">{args}</pre>
+            </>
+          )}
+          {activity.output !== undefined && (
+            <>
+              <span className="tool__label">result</span>
+              <pre className="tool__args">
+                {JSON.stringify(activity.output, null, 2)}
+              </pre>
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
 
 function TurnView({
   turn,
@@ -17,12 +109,14 @@ function TurnView({
   isBusy,
   onRegenerate,
   onEdit,
+  onRespond,
 }: {
   turn: Turn;
   isLastAssistant: boolean;
   isBusy: boolean;
   onRegenerate: () => void;
   onEdit: (next: string) => void;
+  onRespond: (callId: string, approved: boolean) => void;
 }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(turn.content);
@@ -85,6 +179,18 @@ function TurnView({
           </div>
         ) : (
           <>
+            {turn.tools && turn.tools.length > 0 && (
+              <div className="tool-list">
+                {turn.tools.map((activity) => (
+                  <ToolCard
+                    key={activity.callId}
+                    activity={activity}
+                    onRespond={onRespond}
+                  />
+                ))}
+              </div>
+            )}
+
             {turn.role === "user" ? (
               <span className="turn__plain">{turn.content}</span>
             ) : (
@@ -129,11 +235,13 @@ export function MessageList({
   isBusy,
   onRegenerate,
   onEdit,
+  onRespond,
 }: {
   turns: Turn[];
   isBusy: boolean;
   onRegenerate: () => void;
   onEdit: (turn: Turn, next: string) => void;
+  onRespond: (callId: string, approved: boolean) => void;
 }) {
   const lastAssistantId = [...turns]
     .reverse()
@@ -154,6 +262,7 @@ export function MessageList({
           isBusy={isBusy}
           onRegenerate={onRegenerate}
           onEdit={(next) => onEdit(turn, next)}
+          onRespond={onRespond}
         />
       )}
     />

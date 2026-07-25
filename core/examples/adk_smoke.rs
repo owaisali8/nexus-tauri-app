@@ -67,6 +67,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             EngineEvent::Done { usage } => terminal = Some(format!("Done (usage: {usage:?})")),
             EngineEvent::Error { message } => terminal = Some(format!("Error: {message}")),
             EngineEvent::Citation { source, .. } => println!("\n[citation: {source}]"),
+            EngineEvent::ApprovalRequest { name, .. } => {
+                println!("\n[approval needed: {name}]")
+            }
         }
     }
 

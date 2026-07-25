@@ -41,10 +41,35 @@ export type Usage = {
 export type EngineEvent =
   | { type: "token"; text: string }
   | { type: "tool_call"; id: string; name: string; args: unknown }
+  | { type: "approval_request"; id: string; name: string; args: unknown }
   | { type: "tool_result"; id: string; ok: boolean; output: unknown }
   | { type: "citation"; source: string; url?: string | null; snippet: string }
   | { type: "done"; usage?: Usage | null }
   | { type: "error"; message: string };
+
+export type ToolSpec = {
+  name: string;
+  description: string;
+  parameters: unknown;
+};
+
+export function listTools(): Promise<ToolSpec[]> {
+  return invoke("list_tools");
+}
+
+/**
+ * Answer a pending approval prompt.
+ *
+ * Resolves `false` when nothing was waiting — usually the run was cancelled
+ * or the prompt timed out.
+ */
+export function respondToApproval(
+  runId: string,
+  callId: string,
+  approved: boolean,
+): Promise<boolean> {
+  return invoke("respond_to_approval", { runId, callId, approved });
+}
 
 export type Session = {
   id: string;
@@ -127,6 +152,11 @@ export function listModels(providerId: string): Promise<ModelInfo[]> {
 export type EngineKind = "direct" | "adk";
 
 export type RunStreamRequest = {
+  /**
+   * Identifies this run. The caller supplies it because approval prompts are
+   * answered by run id, and the UI needs to know it before the run starts.
+   */
+  runId: string;
   sessionId: string;
   providerId: string;
   model: string;
@@ -138,6 +168,8 @@ export type RunStreamRequest = {
   systemPrompt?: string;
   temperature?: number;
   engine?: EngineKind;
+  /** Tools this run may use. Omitted or empty means none are offered. */
+  toolIds?: string[];
 };
 
 /**
@@ -152,7 +184,7 @@ export function runStream(
   request: RunStreamRequest,
   onEvent: (event: EngineEvent) => void,
 ): () => void {
-  const runId = crypto.randomUUID();
+  const { runId } = request;
   let cancelled = false;
 
   const channel = new Channel<EngineEvent>();
@@ -160,7 +192,7 @@ export function runStream(
     if (!cancelled) onEvent(event);
   };
 
-  invoke("run_stream", { request: { runId, ...request }, channel }).catch(
+  invoke("run_stream", { request, channel }).catch(
     (error: unknown) => {
       if (!cancelled) {
         onEvent({ type: "error", message: String(error) });

@@ -660,6 +660,133 @@ textarea {
   opacity: 0.5;
 }
 
+/* ---- Tool cards ---- */
+
+.tool-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin-bottom: var(--space-3);
+}
+
+.tool {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
+  overflow: hidden;
+}
+
+/* A call waiting on the user is the only one that should draw the eye. */
+.tool--awaiting {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.tool--failed {
+  border-color: var(--danger-soft);
+}
+
+.tool__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  width: 100%;
+  padding: var(--space-2) var(--space-3);
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+}
+
+.tool__name {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+}
+
+.tool__status {
+  font-size: var(--text-xs);
+  color: var(--text-subtle);
+}
+
+.tool--ok .tool__status {
+  color: var(--success);
+}
+
+.tool--failed .tool__status,
+.tool--denied .tool__status {
+  color: var(--danger);
+}
+
+.tool--awaiting .tool__status {
+  color: var(--accent-hover);
+}
+
+.tool__approval,
+.tool__detail {
+  padding: 0 var(--space-3) var(--space-3);
+  border-top: 1px solid var(--border);
+  padding-top: var(--space-3);
+}
+
+.tool__ask {
+  margin: 0 0 var(--space-2);
+  font-size: var(--text-sm);
+}
+
+.tool__label {
+  display: block;
+  margin-bottom: var(--space-1);
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-subtle);
+}
+
+.tool__args {
+  margin: 0 0 var(--space-3);
+  padding: var(--space-2);
+  border-radius: 6px;
+  background: var(--bg-root);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  line-height: 1.5;
+  overflow-x: auto;
+  max-height: 220px;
+}
+
+.tool__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-2);
+}
+
+.field--check {
+  align-self: flex-end;
+}
+
+.check {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
+  cursor: pointer;
+}
+
+.check input {
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.check__text {
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
 /* ---- Provider settings dialog ---- */
 
 .modal__backdrop {

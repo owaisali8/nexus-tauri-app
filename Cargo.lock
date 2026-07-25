@@ -1412,6 +1412,7 @@ dependencies = [
 name = "essentio-app"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "essentio-core",
  "futures",
  "keyring",

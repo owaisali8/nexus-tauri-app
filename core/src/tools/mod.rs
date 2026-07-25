@@ -96,13 +96,33 @@ pub enum Approval {
     Deny,
 }
 
+/// Which run a call belongs to.
+///
+/// Engines are cached per provider and shared across conversations, so a gate
+/// needs this to route a prompt to the right one. Without it a gate holding a
+/// single channel would answer for whichever conversation asked last.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct RunContext {
+    pub session_id: String,
+    pub run_id: String,
+}
+
+impl RunContext {
+    pub fn new(session_id: impl Into<String>, run_id: impl Into<String>) -> Self {
+        Self {
+            session_id: session_id.into(),
+            run_id: run_id.into(),
+        }
+    }
+}
+
 /// Asks the user to approve a side-effecting call.
 ///
 /// `core` does not know how approval is obtained; the shell implements this
 /// against whatever UI exists.
 #[async_trait::async_trait]
 pub trait ApprovalGate: Send + Sync {
-    async fn request(&self, call: &ToolCall) -> Approval;
+    async fn request(&self, context: &RunContext, call: &ToolCall) -> Approval;
 }
 
 /// Approves everything without asking.
@@ -113,7 +133,7 @@ pub struct AutoApprove;
 
 #[async_trait::async_trait]
 impl ApprovalGate for AutoApprove {
-    async fn request(&self, _call: &ToolCall) -> Approval {
+    async fn request(&self, _context: &RunContext, _call: &ToolCall) -> Approval {
         Approval::Approve
     }
 }
@@ -123,7 +143,7 @@ pub struct DenyAll;
 
 #[async_trait::async_trait]
 impl ApprovalGate for DenyAll {
-    async fn request(&self, _call: &ToolCall) -> Approval {
+    async fn request(&self, _context: &RunContext, _call: &ToolCall) -> Approval {
         Approval::Deny
     }
 }
@@ -145,6 +165,14 @@ impl ToolRegistry {
 
     pub fn get(&self, name: &str) -> Option<Arc<dyn Tool>> {
         self.tools.get(name).cloned()
+    }
+
+    /// A tool's declared effect, if it is registered.
+    ///
+    /// Lets a caller find out whether a call will be gated *before* invoking
+    /// it, so the UI can be told a prompt is coming.
+    pub fn effect_of(&self, name: &str) -> Option<Effect> {
+        self.tools.get(name).map(|tool| tool.effect())
     }
 
     pub fn is_empty(&self) -> bool {
@@ -175,12 +203,19 @@ impl ToolRegistry {
     ///
     /// Always returns a [`ToolOutcome`]: a denial or a failure is reported to
     /// the model rather than ending the run.
-    pub async fn invoke(&self, call: &ToolCall, gate: &dyn ApprovalGate) -> ToolOutcome {
+    pub async fn invoke(
+        &self,
+        context: &RunContext,
+        call: &ToolCall,
+        gate: &dyn ApprovalGate,
+    ) -> ToolOutcome {
         let Some(tool) = self.get(&call.name) else {
             return ToolOutcome::failure(&call.id, format!("no such tool: {}", call.name));
         };
 
-        if tool.effect() == Effect::SideEffecting && gate.request(call).await == Approval::Deny {
+        if tool.effect() == Effect::SideEffecting
+            && gate.request(context, call).await == Approval::Deny
+        {
             return ToolOutcome::failure(&call.id, "the user declined this call");
         }
 
@@ -251,6 +286,10 @@ mod tests {
         }
     }
 
+    fn ctx() -> RunContext {
+        RunContext::new("session-1", "run-1")
+    }
+
     fn registry(effect: Effect) -> (ToolRegistry, Arc<AtomicUsize>) {
         let calls = Arc::new(AtomicUsize::new(0));
         let mut registry = ToolRegistry::new();
@@ -266,7 +305,7 @@ mod tests {
     async fn read_only_tools_run_without_asking() {
         let (registry, calls) = registry(Effect::ReadOnly);
         // DenyAll would block anything gated; a read-only tool must not be.
-        let outcome = registry.invoke(&call("counter"), &DenyAll).await;
+        let outcome = registry.invoke(&ctx(), &call("counter"), &DenyAll).await;
 
         assert!(outcome.ok);
         assert_eq!(calls.load(Ordering::SeqCst), 1);
@@ -275,7 +314,7 @@ mod tests {
     #[tokio::test]
     async fn side_effecting_tools_do_not_run_when_denied() {
         let (registry, calls) = registry(Effect::SideEffecting);
-        let outcome = registry.invoke(&call("counter"), &DenyAll).await;
+        let outcome = registry.invoke(&ctx(), &call("counter"), &DenyAll).await;
 
         assert!(!outcome.ok);
         assert_eq!(
@@ -288,7 +327,9 @@ mod tests {
     #[tokio::test]
     async fn side_effecting_tools_run_once_approved() {
         let (registry, calls) = registry(Effect::SideEffecting);
-        let outcome = registry.invoke(&call("counter"), &AutoApprove).await;
+        let outcome = registry
+            .invoke(&ctx(), &call("counter"), &AutoApprove)
+            .await;
 
         assert!(outcome.ok);
         assert_eq!(calls.load(Ordering::SeqCst), 1);
@@ -297,7 +338,7 @@ mod tests {
     #[tokio::test]
     async fn an_unknown_tool_reports_back_instead_of_panicking() {
         let (registry, _) = registry(Effect::ReadOnly);
-        let outcome = registry.invoke(&call("nope"), &AutoApprove).await;
+        let outcome = registry.invoke(&ctx(), &call("nope"), &AutoApprove).await;
 
         assert!(!outcome.ok);
         assert!(outcome.output.to_string().contains("no such tool"));
@@ -308,7 +349,9 @@ mod tests {
         let mut registry = ToolRegistry::new();
         registry.register(Arc::new(Failing));
 
-        let outcome = registry.invoke(&call("failing"), &AutoApprove).await;
+        let outcome = registry
+            .invoke(&ctx(), &call("failing"), &AutoApprove)
+            .await;
         assert!(!outcome.ok);
         assert!(outcome.output.to_string().contains("boom"));
     }
@@ -326,6 +369,66 @@ mod tests {
 
         let names: Vec<String> = registry.specs().into_iter().map(|s| s.name).collect();
         assert_eq!(names, ["alpha", "middle", "zebra"]);
+    }
+
+    /// A gate must be able to tell runs apart, or an approval granted in one
+    /// conversation would release a call in another.
+    #[tokio::test]
+    async fn the_gate_sees_which_run_is_asking() {
+        use std::sync::Mutex;
+
+        #[derive(Default)]
+        struct Recorder {
+            seen: Mutex<Vec<RunContext>>,
+        }
+
+        #[async_trait::async_trait]
+        impl ApprovalGate for Recorder {
+            async fn request(&self, context: &RunContext, _call: &ToolCall) -> Approval {
+                self.seen.lock().unwrap().push(context.clone());
+                // Approve only the run this gate belongs to.
+                if context.run_id == "run-allowed" {
+                    Approval::Approve
+                } else {
+                    Approval::Deny
+                }
+            }
+        }
+
+        let (registry, calls) = registry(Effect::SideEffecting);
+        let gate = Recorder::default();
+
+        let denied = registry
+            .invoke(
+                &RunContext::new("session-1", "run-other"),
+                &call("counter"),
+                &gate,
+            )
+            .await;
+        assert!(!denied.ok);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+        let approved = registry
+            .invoke(
+                &RunContext::new("session-1", "run-allowed"),
+                &call("counter"),
+                &gate,
+            )
+            .await;
+        assert!(approved.ok);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        let seen = gate.seen.lock().unwrap();
+        assert_eq!(seen.len(), 2);
+        assert_eq!(seen[0].run_id, "run-other");
+        assert_eq!(seen[1].run_id, "run-allowed");
+    }
+
+    #[test]
+    fn effect_of_reports_a_registered_tool() {
+        let (registry, _) = registry(Effect::SideEffecting);
+        assert_eq!(registry.effect_of("counter"), Some(Effect::SideEffecting));
+        assert_eq!(registry.effect_of("missing"), None);
     }
 
     #[test]

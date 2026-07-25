@@ -31,14 +31,23 @@ pub enum EngineKind {
 }
 
 /// Construct an engine for a provider.
+///
+/// `tools` and `gate` travel together on purpose: a registry without a gate
+/// would run side-effecting tools unattended.
 pub fn build_engine(
     kind: EngineKind,
     provider: ProviderConfig,
     api_key: Option<String>,
     store: crate::memory::Store,
+    tools: crate::tools::ToolRegistry,
+    gate: Arc<dyn crate::tools::ApprovalGate>,
 ) -> Arc<dyn AgentEngine> {
     match kind {
-        EngineKind::Direct => Arc::new(direct::DirectEngine::new(provider, api_key, store)),
+        EngineKind::Direct => {
+            Arc::new(direct::DirectEngine::new(provider, api_key, store).with_tools(tools, gate))
+        }
+        // ADK drives tools through its own agent loop, which the CompatModel
+        // adapter does not forward yet — see engine/adk/model.rs.
         EngineKind::Adk => Arc::new(adk::AdkEngine::new(provider, api_key, store)),
     }
 }
@@ -112,6 +121,12 @@ pub struct RunOptions {
     pub mcp_ids: Vec<String>,
     #[serde(default)]
     pub mode: RunMode,
+    /// Identifies this run for cancellation and approval routing.
+    ///
+    /// Engines are shared across conversations, so an approval prompt has to
+    /// name the run it belongs to or it could be answered by the wrong one.
+    #[serde(default)]
+    pub run_id: String,
 }
 
 impl RunOptions {
@@ -124,7 +139,13 @@ impl RunOptions {
             tool_ids: Vec::new(),
             mcp_ids: Vec::new(),
             mode: RunMode::default(),
+            run_id: String::new(),
         }
+    }
+
+    pub fn with_run_id(mut self, run_id: impl Into<String>) -> Self {
+        self.run_id = run_id.into();
+        self
     }
 }
 
@@ -150,6 +171,15 @@ pub enum EngineEvent {
     /// The model requested a tool. Side-effectful tools must be gated behind
     /// user approval before the corresponding [`EngineEvent::ToolResult`].
     ToolCall {
+        id: String,
+        name: String,
+        args: serde_json::Value,
+    },
+    /// A side-effecting call is waiting on the user.
+    ///
+    /// The run is blocked until the shell answers. Emitted before anything
+    /// runs, never after — approval that arrives post-hoc is not approval.
+    ApprovalRequest {
         id: String,
         name: String,
         args: serde_json::Value,
