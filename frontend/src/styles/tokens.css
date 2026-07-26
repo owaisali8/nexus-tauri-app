@@ -27,6 +27,15 @@
   --space-6: 32px;
   --space-7: 48px;
 
+  /* The reading column. Messages and the composer share it so the input
+     lines up with the text above it rather than spanning the window. */
+  --chat-width: 780px;
+
+  /* Width of the speaker label column. Must fit the longest label —
+     "ASSISTANT" is about 76px at --text-xs with the tracking below — or the
+     label overflows and runs into the message text. */
+  --role-column: 84px;
+
   /* Radius */
   --radius-sm: 12px;
   --radius-md: 16px;
@@ -41,6 +50,11 @@
 /* Dark is the default surface. */
 :root,
 :root[data-theme="dark"] {
+  /* Tells the browser to render native UI — select popups, scrollbars,
+     autofill, form controls — in dark. Without it a `<select>` opens a light
+     popup and the options inherit near-white text, which is unreadable. */
+  color-scheme: dark;
+
   --bg-root: #09090b;
   --bg-elevated: rgba(24, 24, 27, 0.6);
   --bg-panel: rgba(24, 24, 27, 0.75);
@@ -67,6 +81,8 @@
 }
 
 :root[data-theme="light"] {
+  color-scheme: light;
+
   --bg-root: #fafafa;
   --bg-elevated: rgba(255, 255, 255, 0.8);
   --bg-panel: rgba(255, 255, 255, 0.9);

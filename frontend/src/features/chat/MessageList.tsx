@@ -230,6 +230,11 @@ function TurnView({
   );
 }
 
+/** Breathing room between the header divider and the first message. */
+function MessagesLead() {
+  return <div className="messages__lead" />;
+}
+
 export function MessageList({
   turns,
   isBusy,
@@ -251,6 +256,11 @@ export function MessageList({
     <Virtuoso
       className="messages"
       data={turns}
+      // Padding on the scroller does not separate the first message from the
+      // header: Virtuoso positions items with transforms, so it scrolls under
+      // rather than starting below. A Header component is the supported way
+      // to reserve that space.
+      components={{ Header: MessagesLead }}
       // Stick to the bottom while tokens arrive, but stop fighting the user
       // if they have scrolled up to read something.
       followOutput="auto"

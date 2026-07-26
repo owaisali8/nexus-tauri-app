@@ -30,6 +30,43 @@ textarea {
   color: inherit;
 }
 
+/* ---- Scrollbars ----
+   The platform default is a light track that cuts through a dark window.
+   Firefox and the standard property get the first two rules; WebView2 is
+   Chromium, so the ::-webkit rules are what actually apply on Windows. */
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  /* Padding-box with a transparent border insets the thumb, so it reads as a
+     floating bar rather than filling the gutter edge to edge. */
+  background: var(--border-strong);
+  background-clip: padding-box;
+  border: 2px solid transparent;
+  border-radius: 999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--text-subtle);
+  background-clip: padding-box;
+}
+
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
 .shell {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
@@ -40,6 +77,25 @@ textarea {
   display: grid;
   grid-template-columns: 248px minmax(0, 1fr);
   min-height: 0;
+  transition: grid-template-columns var(--duration-base) var(--ease);
+}
+
+.body--collapsed {
+  grid-template-columns: 0 minmax(0, 1fr);
+}
+
+/* Clipped rather than hidden, so the column can animate to zero without the
+   contents reflowing into a narrow smear on the way. */
+.body--collapsed .sidebar {
+  padding-inline: 0;
+  border-right-color: transparent;
+  overflow: hidden;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .body {
+    transition: none;
+  }
 }
 
 .main {
@@ -341,6 +397,11 @@ textarea {
   border-right: 1px solid var(--border);
   background: var(--bg-panel);
   min-height: 0;
+  /* Content keeps its width while the column shrinks, so it slides out of
+     view instead of squeezing. */
+  min-width: 0;
+  white-space: nowrap;
+  transition: padding var(--duration-base) var(--ease);
 }
 
 /* ---- Navigation ---- */
@@ -487,12 +548,32 @@ textarea {
 .titlebar {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  gap: var(--space-2);
   height: 38px;
-  padding-left: var(--space-4);
+  padding-left: var(--space-2);
   border-bottom: 1px solid var(--border);
   background: var(--bg-panel);
   user-select: none;
+}
+
+.titlebar__toggle {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 26px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-subtle);
+  cursor: pointer;
+  transition:
+    background var(--duration-fast) var(--ease),
+    color var(--duration-fast) var(--ease);
+}
+
+.titlebar__toggle:hover {
+  background: var(--bg-input);
+  color: var(--text);
 }
 
 .titlebar__name {
@@ -500,6 +581,9 @@ textarea {
   font-size: var(--text-sm);
   letter-spacing: 0.04em;
   color: var(--text-muted);
+  /* Pushes the window controls to the far edge now that the titlebar is a
+     left-aligned row rather than space-between. */
+  margin-right: auto;
 }
 
 .window-controls {
@@ -562,6 +646,21 @@ textarea {
   background: var(--bg-input);
   font-size: var(--text-sm);
   transition: border-color var(--duration-fast) var(--ease);
+}
+
+/* Options render in an OS-drawn popup, not against the app's background.
+   --bg-input is translucent, so inheriting it would leave the popup surface
+   showing through; these need opaque values. */
+.field__control option {
+  background-color: var(--bg-root);
+  color: var(--text);
+}
+
+/* Leaves room for the dropdown arrow, which otherwise sits on top of a long
+   model name like "text-embedding-nomic-embed-text-v1.5". */
+select.field__control {
+  padding-right: var(--space-5);
+  text-overflow: ellipsis;
 }
 
 .field__control--narrow {
@@ -661,35 +760,51 @@ textarea {
 
 .messages {
   overflow-y: auto;
-  padding: var(--space-6) var(--space-5);
+  padding: var(--space-5) var(--space-5);
   display: flex;
   flex-direction: column;
   gap: var(--space-5);
 }
 
 /* Virtuoso owns scrolling and item spacing, so the flex layout above must not
-   apply to the virtualized variant. */
+   apply to the virtualized variant. Top spacing comes from the Header
+   component, not padding — see MessageList. */
 .messages[data-virtuoso-scroller] {
   display: block;
-  padding: var(--space-6) 0;
+  padding: 0 0 var(--space-4);
+}
+
+.messages__lead {
+  height: var(--space-5);
 }
 
 .turn {
   display: grid;
-  grid-template-columns: 76px minmax(0, 1fr);
+  /* Right-aligned label so it sits close to the text it introduces. The
+     column is fixed rather than auto so every turn's text starts at the same
+     x — auto would indent "YOU" and "ASSISTANT" differently. */
+  grid-template-columns: var(--role-column) minmax(0, 1fr);
   gap: var(--space-4);
-  max-width: 780px;
+  max-width: var(--chat-width);
   width: 100%;
   margin: 0 auto;
-  padding: 0 var(--space-5) var(--space-5);
+  padding: 0 var(--space-5) var(--space-4);
 }
 
 .turn__role {
+  text-align: right;
   font-size: var(--text-xs);
   text-transform: uppercase;
   letter-spacing: 0.08em;
   color: var(--text-subtle);
-  padding-top: 2px;
+  /* Aligns the label's cap-height with the first line of body text, which
+     sits on a larger line-height. */
+  padding-top: 3px;
+  /* Belt and braces: if a label ever exceeds the column it truncates instead
+     of overlapping the message, which is what a too-narrow column did here. */
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .turn__body {
@@ -707,10 +822,16 @@ textarea {
   color: var(--text-muted);
 }
 
+/* Kept in the layout while hidden so revealing them on hover does not shift
+   the message. The height is fixed and tight, because otherwise every turn
+   reserves a blank action row and the transcript reads as though it has twice
+   the spacing it does. */
 .turn__actions {
   display: flex;
+  align-items: center;
   gap: var(--space-3);
-  margin-top: var(--space-2);
+  height: 18px;
+  margin-top: var(--space-1);
   opacity: 0;
   transition: opacity var(--duration-fast) var(--ease);
 }
@@ -972,7 +1093,9 @@ textarea {
 
 .composer {
   display: flex;
-  align-items: flex-end;
+  /* Centre rather than bottom-align: the button reads as paired with the
+     input at its resting single-line height. */
+  align-items: center;
   gap: var(--space-3);
   padding: var(--space-4);
   border-top: 1px solid var(--border);
@@ -996,6 +1119,14 @@ textarea {
   outline: none;
   border-color: var(--accent);
   box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+/* Matches the input's resting height so the pair reads as one control. */
+.composer .button--send,
+.composer .button--stop {
+  height: 44px;
+  padding-inline: var(--space-5);
+  flex-shrink: 0;
 }
 
 .composer__input:disabled {

@@ -21,6 +21,39 @@ import "./App.css";
 
 type Section = "chats" | "agents";
 
+/** Remembers whether the sidebar was collapsed, across restarts. */
+const SIDEBAR_KEY = "nexus.sidebar.collapsed";
+
+function PanelIcon({ collapsed }: { collapsed: boolean }) {
+  return (
+    <svg width="15" height="15" viewBox="0 0 15 15" aria-hidden="true">
+      <rect
+        x="1.25"
+        y="2.25"
+        width="12.5"
+        height="10.5"
+        rx="2"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.2"
+      />
+      <line
+        x1="5.75"
+        y1="2.25"
+        x2="5.75"
+        y2="12.75"
+        stroke="currentColor"
+        strokeWidth="1.2"
+      />
+      {/* Filled when open, hollow when collapsed, so the icon shows state
+          rather than only the action. */}
+      {!collapsed && (
+        <rect x="1.85" y="2.85" width="3.3" height="9.3" fill="currentColor" />
+      )}
+    </svg>
+  );
+}
+
 function formatWhen(unixSeconds: number) {
   const date = new Date(unixSeconds * 1000);
   const sameDay = new Date().toDateString() === date.toDateString();
@@ -31,6 +64,29 @@ function formatWhen(unixSeconds: number) {
 
 export default function App() {
   const [section, setSection] = useState<Section>("chats");
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(
+    () => localStorage.getItem(SIDEBAR_KEY) === "true",
+  );
+
+  const toggleSidebar = useCallback(() => {
+    setSidebarCollapsed((collapsed) => {
+      const next = !collapsed;
+      localStorage.setItem(SIDEBAR_KEY, String(next));
+      return next;
+    });
+  }, []);
+
+  // Ctrl/Cmd+B, the convention in editors and every app with a side panel.
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "b") {
+        event.preventDefault();
+        toggleSidebar();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [toggleSidebar]);
 
   const [providers, setProviders] = useState<ProviderView[]>([]);
   const [agents, setAgents] = useState<Agent[]>([]);
@@ -161,11 +217,23 @@ export default function App() {
   return (
     <div className="shell">
       <header className="titlebar" data-tauri-drag-region>
+        {/* In the titlebar rather than the sidebar so it stays reachable
+            when the sidebar is gone. */}
+        <button
+          type="button"
+          className="titlebar__toggle"
+          onClick={toggleSidebar}
+          aria-label={sidebarCollapsed ? "Show sidebar" : "Hide sidebar"}
+          aria-pressed={!sidebarCollapsed}
+          title={`${sidebarCollapsed ? "Show" : "Hide"} sidebar  (Ctrl+B)`}
+        >
+          <PanelIcon collapsed={sidebarCollapsed} />
+        </button>
         <span className="titlebar__name">Nexus</span>
         <WindowControls />
       </header>
 
-      <div className="body">
+      <div className={`body ${sidebarCollapsed ? "body--collapsed" : ""}`}>
         <aside className="sidebar">
           <nav className="nav">
             <button
