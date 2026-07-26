@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import {
   type Agent,
-  type EngineKind,
   type ProviderView,
   type ToolSpec,
   deleteAgent,
@@ -432,4 +431,3 @@ export function AgentsView({
   );
 }
 
-export type { EngineKind };

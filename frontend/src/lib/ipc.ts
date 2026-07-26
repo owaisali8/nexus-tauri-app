@@ -260,8 +260,13 @@ export function listModels(providerId: string): Promise<ModelInfo[]> {
   return invoke("list_models", { providerId });
 }
 
-/** Which engine implementation runs the turn. Mirrors core's `EngineKind`. */
-export type EngineKind = "direct" | "adk";
+/**
+ * Which engine implementation runs the turn. Mirrors core's `EngineKind`.
+ *
+ * One value today. It stays a named type because it is persisted per session
+ * and per agent, and is the swap point if another engine is added.
+ */
+export type EngineKind = "direct";
 
 export type RunStreamRequest = {
   /**

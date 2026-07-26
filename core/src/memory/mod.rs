@@ -782,17 +782,17 @@ fn read_agent(row: &rusqlite::Row<'_>) -> rusqlite::Result<Agent> {
 fn engine_to_str(kind: EngineKind) -> &'static str {
     match kind {
         EngineKind::Direct => "direct",
-        EngineKind::Adk => "adk",
     }
 }
 
-/// Unknown values fall back to `Direct` rather than failing the read — a row
-/// written by a newer build should not make the session list unopenable.
-fn engine_from_str(value: &str) -> EngineKind {
-    match value {
-        "adk" => EngineKind::Adk,
-        _ => EngineKind::Direct,
-    }
+/// Read a stored engine name.
+///
+/// Every value maps to `Direct`, because that is the only engine. This is not
+/// dead code: conversations created while the ADK engine existed carry
+/// `engine = 'adk'`, and they must still open now that it is gone. Failing the
+/// read instead would make those sessions unopenable.
+fn engine_from_str(_value: &str) -> EngineKind {
+    EngineKind::Direct
 }
 
 #[cfg(test)]
@@ -819,14 +819,14 @@ mod tests {
                 "First chat",
                 "lmstudio-local",
                 "qwen",
-                EngineKind::Adk,
+                EngineKind::Direct,
                 None,
             )
             .unwrap();
 
         let loaded = store.get_session(&created.id).unwrap().unwrap();
         assert_eq!(loaded.title, "First chat");
-        assert_eq!(loaded.engine, EngineKind::Adk);
+        assert_eq!(loaded.engine, EngineKind::Direct);
         assert_eq!(store.list_sessions().unwrap().len(), 1);
     }
 
@@ -933,9 +933,11 @@ mod tests {
         assert!(store.get_setting("missing").unwrap().is_none());
     }
 
+    /// Sessions written while other engines existed store their name, and
+    /// must still open now that only Direct remains.
     #[test]
-    fn unknown_engine_value_falls_back_to_direct() {
+    fn any_stored_engine_value_reads_as_direct() {
+        assert_eq!(engine_from_str("adk"), EngineKind::Direct);
         assert_eq!(engine_from_str("from-the-future"), EngineKind::Direct);
-        assert_eq!(engine_from_str("adk"), EngineKind::Adk);
     }
 }

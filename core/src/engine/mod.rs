@@ -5,7 +5,6 @@
 //! against these DTOs and flipping a factory — the UI, persistence, RAG and
 //! tool layers are untouched.
 
-pub mod adk;
 pub mod direct;
 
 use std::sync::Arc;
@@ -17,17 +16,19 @@ use crate::{Result, providers::ProviderConfig};
 
 /// Which engine implementation to run a turn through.
 ///
-/// This is the swap point the architecture is built around: adding an engine
-/// means a new variant and a new arm in [`build_engine`], with nothing else in
+/// One variant today. It stays an enum because the value is persisted per
+/// session and per agent, and because this is the swap point: adding an
+/// engine is a variant and an arm in [`build_engine`], with nothing else in
 /// the app touched.
+///
+/// An unrecognised stored value reads back as [`EngineKind::Direct`], so rows
+/// written when other engines existed still load.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EngineKind {
-    /// Streamed completions with no agent framework.
+    /// Streamed completions and a tool loop, with no agent framework.
     #[default]
     Direct,
-    /// ADK-Rust: tool loops, sub-agents, workflow agents.
-    Adk,
 }
 
 /// Construct an engine for a provider.
@@ -46,9 +47,6 @@ pub fn build_engine(
         EngineKind::Direct => {
             Arc::new(direct::DirectEngine::new(provider, api_key, store).with_tools(tools, gate))
         }
-        // ADK drives tools through its own agent loop, which the CompatModel
-        // adapter does not forward yet — see engine/adk/model.rs.
-        EngineKind::Adk => Arc::new(adk::AdkEngine::new(provider, api_key, store)),
     }
 }
 

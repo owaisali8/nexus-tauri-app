@@ -40,7 +40,7 @@ fn conversations_survive_reopening_the_database() {
                 "Persisted chat",
                 "lmstudio-local",
                 "qwen",
-                EngineKind::Adk,
+                EngineKind::Direct,
                 None,
             )
             .unwrap();
@@ -63,7 +63,7 @@ fn conversations_survive_reopening_the_database() {
     assert_eq!(sessions[0].title, "Persisted chat");
     assert_eq!(
         sessions[0].engine,
-        EngineKind::Adk,
+        EngineKind::Direct,
         "the engine a conversation was produced with must survive"
     );
 

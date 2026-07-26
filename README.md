@@ -28,7 +28,6 @@ server, not merely unit-tested.
 | Built-in tools (`current_time`, `write_note`) | verified live |
 | MCP servers | verified live, incl. through chat |
 | Document search (RAG) | verified live, local embeddings |
-| Tools on the ADK engine | not wired — Direct only |
 | Deep research / documents editor / compare | not started |
 
 ## Document search
@@ -80,25 +79,38 @@ a plain PATH search would not find the `.cmd` shim.
 ```
 core/          engine-agnostic product logic
   engine/      AgentEngine trait + EngineEvent — the one seam engines cross
-    adk/       ADK-Rust implementation (the only place adk_* may be imported)
-    direct/    framework-free implementation over the provider transports
+    direct/    streamed completions and a tool loop, no agent framework
   providers/   ChatTransport per wire format: openai_compat, anthropic, gemini
-  memory/      SQLite store for sessions, messages, settings
+  rag/         chunking, embeddings, retrieval
+  memory/      SQLite store for sessions, messages, agents, documents
   tools/       Tool trait, approval gate, built-ins, MCP client
 tauri-app/     shell: commands, streaming channel, OS keychain, approval router
 frontend/      React 19 + TypeScript
 ```
 
-Two engines implement the same `AgentEngine` trait and are selectable per
-conversation:
+### No agent framework
 
-- **Direct** — streamed completions, no agent framework.
-- **ADK** — ADK-Rust's agent loop and session handling, driven through our own
-  transports rather than its built-in ones. See `core/src/engine/adk/model.rs`
-  for why.
+This ran on [ADK-Rust](https://github.com/zavora-ai/adk-rust) for a while and
+no longer does. The decision is worth recording, because "add a framework" is
+the obvious move and it did not pay here.
 
-`core/tests/adk_boundary.rs` fails the build if any `adk_*` reference appears
-outside `core/src/engine/adk/`, which is what keeps the engine swappable.
+By the time ADK worked, every part of it had been replaced:
+
+- Its transport dropped every character after the first `<` or `[` in a reply,
+  so `Vec<T>` truncated an answer. Replaced with our own.
+- Its tool loop was never wired; ours does the work.
+- Its sessions are in-memory, so state was rehydrated from SQLite each run.
+- `Runner::run` does not create a missing session despite documenting that it
+  does, and the failure was silent.
+
+What remained was a `Runner` wrapping our transport, emitting events we mapped
+back to our own type — for 52% of the dependency tree (755 crates down to 364
+on removal).
+
+`AgentEngine` stays. It is what made trying ADK cheap and dropping it cheaper,
+and it is where a framework goes if one earns its place. Multi-agent
+orchestration with handoff and shared state would be a real reason; a
+plan → search → read → synthesize loop is not.
 
 ## Secrets
 
@@ -146,12 +158,8 @@ These need LM Studio running and are excluded from `cargo test`:
 
 ```bash
 cargo run -p nexus-core --example lmstudio_smoke   # direct transport
-cargo run -p nexus-core --example adk_smoke        # ADK engine + persistence
 cargo run -p nexus-core --example tools_smoke      # tool call -> execute -> answer
 ```
-
-`adk_smoke` also guards a regression where ADK's own transport silently
-discarded everything after the first `<` or `[` in a reply.
 
 This one needs `npx` rather than LM Studio, and downloads a server on first
 run:
