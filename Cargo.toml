@@ -16,6 +16,20 @@ thiserror = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
 tracing = "0.1"
 
+# Debug artifacts had reached 43 GB, most of it debug info for dependencies
+# that are never stepped through. These two settings cut the bulk of it while
+# keeping backtraces useful.
+[profile.dev]
+# Line tables give file and line numbers in panics and backtraces, without the
+# full variable and type info a step-debugger needs. Restore `debug = true`
+# if you ever want to break inside our own code.
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+# Dependencies get none at all. A backtrace still names the frames; it just
+# will not point at a line inside someone else's crate.
+debug = false
+
 [profile.release]
 codegen-units = 1
 lto = true
