@@ -3,10 +3,10 @@
 //! Needs `npx` on PATH; the first run downloads the server package.
 //!
 //! ```bash
-//! cargo run -p essentio-core --example mcp_smoke
+//! cargo run -p nexus-core --example mcp_smoke
 //! ```
 
-use essentio_core::tools::{
+use nexus_core::tools::{
     AutoApprove, Effect, RunContext, ToolCall, ToolRegistry,
     mcp::{McpManager, McpServerConfig},
 };
@@ -72,7 +72,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 name: target.name.clone(),
                 arguments: serde_json::json!({
                     "entities": [{
-                        "name": "essentio",
+                        "name": "nexus",
                         "entityType": "project",
                         "observations": ["verified the MCP round trip"]
                     }]

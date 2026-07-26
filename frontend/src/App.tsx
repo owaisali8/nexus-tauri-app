@@ -161,7 +161,7 @@ export default function App() {
   return (
     <div className="shell">
       <header className="titlebar" data-tauri-drag-region>
-        <span className="titlebar__name">Essentio</span>
+        <span className="titlebar__name">Nexus</span>
         <WindowControls />
       </header>
 

@@ -1,9 +1,10 @@
 //! Tauri shell.
 //!
-//! Thin wrappers over `essentio_core`: command surface, the streaming bridge,
+//! Thin wrappers over `nexus_core`: command surface, the streaming bridge,
 //! and OS keychain access. Product logic belongs in `core`, not here.
 
 mod approval;
+mod migrate;
 mod secrets;
 
 use std::{
@@ -13,7 +14,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use essentio_core::{
+use nexus_core::{
     engine::{
         AgentEngine, EngineEvent, EngineKind, RunOptions, SessionId, UserInput, build_engine,
     },
@@ -725,7 +726,7 @@ fn list_mcp_servers(
                 .specs()
                 .into_iter()
                 .filter(|spec| {
-                    essentio_core::tools::mcp::split_namespaced(&spec.name)
+                    nexus_core::tools::mcp::split_namespaced(&spec.name)
                         .is_some_and(|(server, _)| server == config.id)
                 })
                 .map(|spec| spec.name)
@@ -920,7 +921,7 @@ fn get_messages(state: State<'_, AppState>, session_id: String) -> Result<Vec<Me
         .map_err(|e| e.to_string())
 }
 
-/// Deliberately not `essentio.sqlite3`.
+/// Deliberately not `nexus.sqlite3`.
 ///
 /// The pre-workspace build shipped that filename with its own
 /// `schema_migrations` ledger recording versions 1 and 2. Reusing the name
@@ -938,7 +939,7 @@ fn init_tracing() {
     use tracing_subscriber::{EnvFilter, fmt};
 
     let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("essentio_core=info,essentio_app_lib=info,warn"));
+        .unwrap_or_else(|_| EnvFilter::new("nexus_core=info,nexus_app_lib=info,warn"));
 
     // A second init would fail; ignore it so tests and repeated calls are safe.
     let _ = fmt().with_env_filter(filter).with_target(true).try_init();
@@ -954,6 +955,19 @@ pub fn run() {
             // The store needs the resolved app data dir, so it is built here
             // rather than in a Default impl.
             let data_dir = app_data_dir(app.handle())?;
+
+            // The app was renamed, which moves both the data directory and the
+            // keychain service. Carry the previous identity's data across
+            // before anything reads from either.
+            if !migrate::adopt_previous_data(&data_dir).is_empty() {
+                let refs: Vec<String> = load_providers(app.handle())
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter_map(|provider| provider.api_key_ref)
+                    .collect();
+                migrate::adopt_previous_secrets(&refs);
+            }
+
             let store = Store::open(&data_dir.join(DB_FILE))?;
             // Notes are scoped to the app data dir; the tool refuses to write
             // outside whatever root it is given.

@@ -5,7 +5,7 @@
 
 use keyring::Entry;
 
-const SERVICE: &str = "com.owais.essentio";
+const SERVICE: &str = "com.owais.nexus";
 
 fn entry(key_ref: &str) -> Result<Entry, String> {
     Entry::new(SERVICE, key_ref).map_err(|error| format!("keychain unavailable: {error}"))

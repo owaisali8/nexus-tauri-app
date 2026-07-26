@@ -3,15 +3,15 @@
 //! Exercises the same seam the app uses: AgentEngine::run_stream -> EngineEvent.
 //!
 //! ```bash
-//! cargo run -p essentio-core --example adk_smoke
+//! cargo run -p nexus-core --example adk_smoke
 //! ```
 
-use essentio_core::{
+use futures::StreamExt;
+use nexus_core::{
     engine::{AgentEngine, EngineEvent, EngineKind, RunOptions, UserInput, adk::AdkEngine},
     memory::Store,
     providers::{ChatTransport, ProviderConfig, openai_compat::OpenAiCompatClient},
 };
-use futures::StreamExt;
 use std::io::Write;
 
 #[tokio::main]

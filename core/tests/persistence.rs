@@ -3,7 +3,7 @@
 //! These use a real file, not `:memory:`, because the thing under test is
 //! whether data is still there after the process that wrote it is gone.
 
-use essentio_core::{engine::EngineKind, memory::Store};
+use nexus_core::{engine::EngineKind, memory::Store};
 
 /// A temp path that cleans itself up, including the WAL sidecar files.
 struct TempDb(std::path::PathBuf);
@@ -12,7 +12,7 @@ impl TempDb {
     fn new(name: &str) -> Self {
         let mut path = std::env::temp_dir();
         path.push(format!(
-            "essentio-test-{name}-{}.sqlite3",
+            "nexus-test-{name}-{}.sqlite3",
             uuid::Uuid::new_v4()
         ));
         Self(path)

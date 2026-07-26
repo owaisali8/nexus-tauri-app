@@ -1,4 +1,4 @@
-# Essentio
+# Nexus
 
 A local-first AI workspace. Tauri 2 desktop shell, React 19 frontend, Rust core.
 
@@ -145,9 +145,9 @@ npm --prefix frontend run build
 These need LM Studio running and are excluded from `cargo test`:
 
 ```bash
-cargo run -p essentio-core --example lmstudio_smoke   # direct transport
-cargo run -p essentio-core --example adk_smoke        # ADK engine + persistence
-cargo run -p essentio-core --example tools_smoke      # tool call -> execute -> answer
+cargo run -p nexus-core --example lmstudio_smoke   # direct transport
+cargo run -p nexus-core --example adk_smoke        # ADK engine + persistence
+cargo run -p nexus-core --example tools_smoke      # tool call -> execute -> answer
 ```
 
 `adk_smoke` also guards a regression where ADK's own transport silently
@@ -157,13 +157,13 @@ This one needs `npx` rather than LM Studio, and downloads a server on first
 run:
 
 ```bash
-cargo run -p essentio-core --example mcp_smoke        # real MCP server round trip
+cargo run -p nexus-core --example mcp_smoke        # real MCP server round trip
 ```
 
 RAG needs an embedding model loaded in LM Studio:
 
 ```bash
-cargo run -p essentio-core --example rag_smoke        # ingest, retrieve, rank
+cargo run -p nexus-core --example rag_smoke        # ingest, retrieve, rank
 ```
 
 ## Data locations
@@ -172,6 +172,6 @@ cargo run -p essentio-core --example rag_smoke        # ingest, retrieve, rank
 - Provider config: `<app data>/providers.json`
 - MCP servers: `<app data>/mcp.json`
 - Notes written by `write_note`: `<app data>/notes/`
-- API keys: OS keychain, service `com.owais.essentio`
+- API keys: OS keychain, service `com.owais.nexus`
 
-On Windows `<app data>` is `%APPDATA%\com.owais.essentio`.
+On Windows `<app data>` is `%APPDATA%\com.owais.nexus`.

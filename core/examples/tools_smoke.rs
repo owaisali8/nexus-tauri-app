@@ -4,16 +4,16 @@
 //! it, feeds the result back, and the model answers using it.
 //!
 //! ```bash
-//! cargo run -p essentio-core --example tools_smoke
+//! cargo run -p nexus-core --example tools_smoke
 //! ```
 
-use essentio_core::{
+use futures::StreamExt;
+use nexus_core::{
     engine::{AgentEngine, EngineEvent, EngineKind, RunOptions, UserInput, direct::DirectEngine},
     memory::Store,
     providers::{ChatTransport, ProviderConfig, openai_compat::OpenAiCompatClient},
     tools::{AutoApprove, builtin::default_registry},
 };
-use futures::StreamExt;
 use std::sync::Arc;
 
 #[tokio::main]

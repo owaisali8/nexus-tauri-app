@@ -6,7 +6,7 @@
 
 use std::{collections::HashMap, sync::Mutex, time::Duration};
 
-use essentio_core::tools::{Approval, ApprovalGate, RunContext, ToolCall};
+use nexus_core::tools::{Approval, ApprovalGate, RunContext, ToolCall};
 use tokio::sync::oneshot;
 
 /// How long a prompt waits before giving up.

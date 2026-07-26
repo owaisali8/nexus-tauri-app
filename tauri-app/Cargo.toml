@@ -1,5 +1,5 @@
 [package]
-name = "essentio-app"
+name = "nexus-app"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,14 +8,14 @@ description = "Tauri shell: commands, streaming channels, secret storage"
 [lib]
 # The `_lib` suffix keeps the lib name distinct from the bin name, which
 # otherwise collides on Windows. See rust-lang/cargo#8519.
-name = "essentio_app_lib"
+name = "nexus_app_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-essentio-core = { path = "../core" }
+nexus-core = { path = "../core" }
 
 tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"

@@ -4,10 +4,10 @@
 //! an unrelated query retrieves nothing.
 //!
 //! ```bash
-//! cargo run -p essentio-core --example rag_smoke
+//! cargo run -p nexus-core --example rag_smoke
 //! ```
 
-use essentio_core::{
+use nexus_core::{
     memory::Store,
     providers::{ChatTransport, ProviderConfig, openai_compat::OpenAiCompatClient},
     rag::{Retriever, embed::OpenAiCompatEmbedder},

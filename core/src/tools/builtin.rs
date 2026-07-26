@@ -200,7 +200,7 @@ mod tests {
 
     fn temp_root(label: &str) -> std::path::PathBuf {
         let mut path = std::env::temp_dir();
-        path.push(format!("essentio-notes-{label}-{}", std::process::id()));
+        path.push(format!("nexus-notes-{label}-{}", std::process::id()));
         path
     }
 

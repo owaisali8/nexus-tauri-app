@@ -24,7 +24,7 @@ use crate::{
     providers::ProviderConfig,
 };
 
-const APP_NAME: &str = "essentio";
+const APP_NAME: &str = "nexus";
 const AGENT_NAME: &str = "assistant";
 const DEFAULT_USER: &str = "local";
 

@@ -3,16 +3,16 @@
 //! Not a unit test: it needs a real server, so it stays out of `cargo test`.
 //!
 //! ```bash
-//! cargo run -p essentio-core --example lmstudio_smoke
+//! cargo run -p nexus-core --example lmstudio_smoke
 //! ```
 
-use essentio_core::{
+use futures::StreamExt;
+use nexus_core::{
     engine::EngineEvent,
     providers::{
         ChatMessage, ChatRequest, ChatTransport, ProviderConfig, openai_compat::OpenAiCompatClient,
     },
 };
-use futures::StreamExt;
 use std::io::Write;
 
 #[tokio::main]
