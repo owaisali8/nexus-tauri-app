@@ -1,0 +1,33 @@
+[package]
+name = "nexus-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Tauri shell: commands, streaming channels, secret storage"
+
+[lib]
+# The `_lib` suffix keeps the lib name distinct from the bin name, which
+# otherwise collides on Windows. See rust-lang/cargo#8519.
+name = "nexus_app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+nexus-core = { path = "../core" }
+
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+
+futures.workspace = true
+keyring = { version = "4.1.5", features = ["apple-native-keyring-store"] }
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync"] }
+async-trait.workspace = true
+tracing.workspace = true
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+
+[dev-dependencies]
+uuid = { version = "1.24.0", features = ["v4"] }

@@ -1,0 +1,32 @@
+[package]
+# NOT `core` — that shadows Rust's built-in `core` crate and breaks any derive
+# macro that expands to a `core::` path (thiserror, serde). Directory stays
+# `core/` to match the architecture doc.
+name = "nexus-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Engine-agnostic product logic for the AI workspace"
+
+[lib]
+name = "nexus_core"
+path = "src/lib.rs"
+
+[dependencies]
+async-stream = "0.3.6"
+async-trait.workspace = true
+eventsource-stream = "0.2.3"
+futures.workspace = true
+reqwest = { version = "0.13.4", default-features = false, features = ["json", "stream", "rustls", "charset", "http2"] }
+rmcp = { version = "2.2.0", default-features = false, features = ["client", "transport-child-process"] }
+rusqlite = { version = "0.40.1", features = ["bundled"] }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+uuid = { version = "1.24.0", features = ["v4"] }
+which = "8.0.5"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros"] }
