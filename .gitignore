@@ -37,5 +37,3 @@ tauri-app/gen/schemas
 *.njsproj
 *.sln
 *.sw?
-./target
-/target
