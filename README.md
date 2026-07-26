@@ -128,15 +128,17 @@ database, to logs, or returned to the frontend.
 ## Development
 
 ```bash
-# frontend deps
-npm --prefix frontend install
+npm install                    # Tauri CLI, at the workspace root
+npm --prefix frontend install  # frontend deps
 
-# run the app — from the workspace root, not frontend/
-./frontend/node_modules/.bin/tauri dev
+npm run dev                    # run the app
+npm run build                  # bundle it
 ```
 
-The Tauri CLI only searches subdirectories for `tauri.conf.json`, so it has to
-run from the workspace root.
+Both from the workspace root. The Tauri CLI lives there rather than in
+`frontend/` because it only searches *subdirectories* for `tauri.conf.json`,
+and because it treats the directory holding `package.json` as the app root —
+which is what `beforeDevCommand`'s paths are relative to.
 
 ### Gates
 

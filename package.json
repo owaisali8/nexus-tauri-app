@@ -1,0 +1,14 @@
+{
+  "name": "nexus-workspace",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Launch scripts for the Nexus desktop app",
+  "scripts": {
+    "dev": "tauri dev",
+    "build": "tauri build",
+    "tauri": "tauri"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2"
+  }
+}
